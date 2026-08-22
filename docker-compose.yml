@@ -1,0 +1,48 @@
+# Real container-network version of poc_network_challenge.py's separation
+# test. Loopback (see README) sometimes fails to separate honest holder
+# from relay on a single shot; this runs the exact same protocol over real
+# per-container network stacks instead — closer to an actual deployment.
+#
+# Run:
+#   docker compose up --build --abort-on-container-exit verifier
+#
+# holder1, holder2 — two independent, honest peers, each holds the real
+#   chunks and answers challenges directly.
+# relay            — holds nothing; on every challenge, opens a second real
+#   TCP connection to holder1, fetches the real bytes, then answers.
+# verifier         — waits for all three, runs N_STATS_SAMPLES challenges
+#   against holder1 (honest) and relay (cheating via holder1), plus
+#   holder2 as a same-vs-same jitter baseline, then reports the same
+#   session-size separation table poc_network_challenge.py's `stats` mode
+#   does — but over real container networking, not loopback.
+
+services:
+  holder1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["holder", "8901"]
+
+  holder2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["holder", "8901"]
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["relay", "8902", "holder1", "8901"]
+    depends_on:
+      - holder1
+
+  verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["verify-remote", "holder1", "8901", "relay", "8902", "holder2", "8901"]
+    depends_on:
+      - holder1
+      - holder2
+      - relay
