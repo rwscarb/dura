@@ -143,6 +143,28 @@ def find_manifest_entry(archive_dir, file_name=None):
     return entries[-1]  # last-write-wins, same convention ott itself uses
 
 
+def load_manifest_entries(archive_dir, file_name=None):
+    """Every distinct file in the archive, not just one — find_manifest_entry
+    collapses to a single entries[-1], which is exactly why `host <dir>` with
+    no --file only ever served the single most-recently-added file out of a
+    45-video archive. Dedupes by name (last-write-wins, same convention)."""
+    archive_dir = os.path.expanduser(archive_dir)
+    manifest_path = os.path.join(archive_dir, '.ott', 'manifest.jsonl')
+    if not os.path.exists(manifest_path):
+        sys.exit(f"no .ott/manifest.jsonl in {archive_dir} — archive a file with ott first")
+    with open(manifest_path) as f:
+        raw = [json.loads(line) for line in f if line.strip()]
+    if file_name:
+        raw = [e for e in raw if e['name'] == file_name]
+    by_name = {}
+    for e in raw:
+        by_name[e['name']] = e
+    entries = list(by_name.values())
+    if not entries:
+        sys.exit(f"no archived file found in {archive_dir}" + (f" matching {file_name}" if file_name else ""))
+    return entries
+
+
 def load_leaves(archive_dir, root_hash):
     archive_dir = os.path.expanduser(archive_dir)
     chunks_path = os.path.join(archive_dir, '.ott', 'chunks', f'{root_hash}.json')
@@ -154,13 +176,22 @@ def load_leaves(archive_dir, root_hash):
         return json.load(f)
 
 
-def serve_session(conn, entry, leaves, file_path, price):
+def serve_session(conn, entries_by_hash, default_hash, price):
     """Handle every command on one connection, not just one — a download
     needs INFO + LEAVES + one FETCH per chunk (thousands, for a real
     archive), and reconnecting per command is what makes a tunneled
     connection (see tunnel_relay.py) pay a full relay rendezvous per
     chunk instead of once per session. Shared by the direct accept() loop
-    below and by run_host_tunnel's per-stream data connections."""
+    below and by run_host_tunnel's per-stream data connections.
+
+    entries_by_hash lets one server (one port) hold more than one file —
+    a downloader picks which via SELECT <content_hash_or_prefix> before
+    anything else. default_hash (set only when the host has exactly one
+    file) means a single-file host never needs SELECT at all, so the
+    `download --from host:port` discovery-skipping escape hatch and the
+    tunnel path (already scoped to one file before this function runs)
+    keep working unchanged."""
+    selected = default_hash
     with conn:
         while True:
             line = recv_line(conn)
@@ -169,6 +200,19 @@ def serve_session(conn, entry, leaves, file_path, price):
             parts = line.split()
             if not parts:
                 continue
+            if parts[0] == 'SELECT':
+                match = next((h for h in entries_by_hash if len(parts) > 1 and h.startswith(parts[1])), None)
+                if match:
+                    selected = match
+                    conn.sendall(b'OK\n')
+                else:
+                    conn.sendall(b'ERR unknown content hash\n')
+                continue
+            if selected is None:
+                conn.sendall(b'ERR this host serves more than one file '
+                              b'- send SELECT <content_hash> first\n')
+                continue
+            entry, leaves, file_path = entries_by_hash[selected]
             if parts[0] == 'INFO':
                 conn.sendall((json.dumps({
                     'name': entry['name'], 'sha256': entry['sha256'], 'size': entry['size'],
@@ -195,11 +239,15 @@ def serve_session(conn, entry, leaves, file_path, price):
 
 def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False, price=0):
     archive_dir = os.path.expanduser(archive_dir)
-    entry = find_manifest_entry(archive_dir, file_name)
-    leaves = load_leaves(archive_dir, entry['sha256'])
-    file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
-    if not os.path.exists(file_path):
-        sys.exit(f"archived file not found on disk at {file_path}")
+    entries = load_manifest_entries(archive_dir, file_name)
+    entries_by_hash = {}
+    for entry in entries:
+        leaves = load_leaves(archive_dir, entry['sha256'])
+        file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
+        if not os.path.exists(file_path):
+            sys.exit(f"archived file not found on disk at {file_path}")
+        entries_by_hash[entry['sha256']] = (entry, leaves, file_path)
+    default_hash = next(iter(entries_by_hash)) if len(entries_by_hash) == 1 else None
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -209,16 +257,22 @@ def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=Fal
         # a background thread's print() races with cmd.Cmd's input()-driven
         # prompt on the same stdout — see run_relay_server's docstring for
         # why the shell passes quiet=True instead of patching this visually
-        print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
-              f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
-        print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
+        if default_hash:
+            entry = entries[0]
+            print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
+                  f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
+            print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
+        else:
+            total_size = sum(e['size'] for e in entries)
+            print(f"[host:{port}] serving {len(entries)} files ({total_size:,} bytes total) "
+                  f"— clients SELECT which one by content hash")
 
     while True:
         conn, _ = srv.accept()
         # a whole download now lives on one connection (see serve_session) —
         # accept() must hand off to a thread per connection, or one session
         # would block every other downloader until it finished
-        threading.Thread(target=serve_session, args=(conn, entry, leaves, file_path, price),
+        threading.Thread(target=serve_session, args=(conn, entries_by_hash, default_hash, price),
                           daemon=True).start()
 
 
@@ -229,6 +283,7 @@ def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, pri
     open for the lifetime of hosting; each real downloader gets its own
     DATA connection, dialed back to the relay on demand (NEWSTREAM), so
     concurrent tunneled downloads don't block each other."""
+    entries_by_hash = {entry['sha256']: (entry, leaves, file_path)}
     ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ctrl.connect((relay_host, relay_port))
     ctrl.sendall(f'REGISTER {token}\n'.encode())
@@ -249,7 +304,7 @@ def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, pri
             data_conn.connect((relay_host, relay_port))
             data_conn.sendall(f'DATA {stream_id}\n'.encode())
             threading.Thread(target=serve_session,
-                              args=(data_conn, entry, leaves, file_path, price),
+                              args=(data_conn, entries_by_hash, entry['sha256'], price),
                               daemon=True).start()
 
 
@@ -324,6 +379,14 @@ def download(host_addr, out_path, tunnel=None, content_hash=None, on_progress=No
     out_path = os.path.expanduser(out_path)
     via = f"tunnel {tunnel[0]}:{tunnel[1]}" if tunnel else host_addr
     with open_connection(host_addr, tunnel=tunnel, content_hash=content_hash) as conn:
+        if content_hash and not tunnel:
+            # tunnel connections are already scoped to one file by the relay's
+            # rendezvous token (see run_host_tunnel) — SELECT is only needed
+            # against a direct multi-file host, which may be serving more than
+            # just this content_hash on the same port
+            sel = conn.request(f'SELECT {content_hash}')
+            if sel != 'OK':
+                sys.exit(f"host at {host_addr} rejected SELECT {content_hash[:16]}...: {sel}")
         info = json.loads(conn.request('INFO'))
         print(f"downloading {info['name']} ({info['size']:,} bytes, {info['n_chunks']} chunks) "
               f"from {via}")
@@ -484,6 +547,11 @@ def select_host(candidates, k=3, reputation=None, trust_in_signers=None):
         tunnel = _parse_tunnel(c.get('tunnel'))
         try:
             with open_connection(c['host'], tunnel=tunnel, content_hash=c['content_hash']) as conn:
+                if not tunnel:
+                    sel = conn.request(f"SELECT {c['content_hash']}")
+                    if sel != 'OK':
+                        print(f"  x {c['host']}: SELECT rejected ({sel}) — skipping")
+                        continue
                 leaves = json.loads(conn.request('LEAVES'))
                 info = json.loads(conn.request('INFO'))
                 if merkle_root(leaves) != info['sha256'] or info['sha256'] != c['content_hash']:

@@ -80,11 +80,15 @@ class DuraShell(cmd.Cmd):
     def do_host(self, arg):
         """host <archive_dir> [--file NAME] [--port N] [--price SAT] [--relay URL]
         [--no-announce] [--advertise-host HOST] [--tunnel RELAY_HOST:PORT]
-        — serve a real archived file in a background thread (shell stays usable),
-        announcing it on --relay (default: your session's default relay — see `relay`)
-        unless --no-announce is given. --price sets what download charges (default free).
-        --tunnel registers with a tunnel_relay.py instead of relying on a reachable
-        inbound port — for hosting behind NAT/CGNAT."""
+        — serve every archived file in archive_dir in a background thread
+        (shell stays usable), one port, downloaders SELECT which by content
+        hash. Pass --file to restrict to a single file. Announces each file
+        on --relay (default: your session's default relay — see `relay`)
+        unless --no-announce is given. --price sets what download charges
+        (default free). --tunnel registers with a tunnel_relay.py instead of
+        relying on a reachable inbound port — for hosting behind NAT/CGNAT,
+        and only supports one file at a time, so requires --file if
+        archive_dir has more than one."""
         parts = shlex.split(arg)
         if not parts:
             print('  usage: host <archive_dir> [--file NAME] [--port N] [--price SAT] '
@@ -115,25 +119,31 @@ class DuraShell(cmd.Cmd):
                 i += 1; tunnel = parts[i]
             i += 1
 
-        entry = node.find_manifest_entry(archive_dir, file_name)
+        entries = node.load_manifest_entries(archive_dir, file_name)
+        if tunnel and len(entries) > 1:
+            print(f'  {len(entries)} files in {archive_dir} but --tunnel only serves one at a time '
+                  f'— pass --file NAME to pick one')
+            return
         # fail fast, before announcing anything — a manifest entry with no
         # matching chunk data would otherwise get announced to the relay
         # and only fail later, in the background server thread (onecmd's
         # exception net doesn't reach into background threads)
-        leaves = node.load_leaves(archive_dir, entry['sha256'])
+        all_leaves = {e['sha256']: node.load_leaves(archive_dir, e['sha256']) for e in entries}
         if relay and not no_announce:
-            result = node.publish(self.identity, relay, entry['sha256'], entry['name'],
-                                   f'{advertise_host}:{port}', tunnel=tunnel)
-            print(f'  announced on {relay}: {result}')
+            for entry in entries:
+                result = node.publish(self.identity, relay, entry['sha256'], entry['name'],
+                                       f'{advertise_host}:{port}', tunnel=tunnel)
+                print(f'  announced {entry["name"]} on {relay}: {result}')
         elif not relay:
             print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
         if tunnel:
+            entry = entries[0]
             relay_host, relay_port = tunnel.rsplit(':', 1)
             expanded_dir = os.path.expanduser(archive_dir)
             file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
             tt = threading.Thread(target=node.run_host_tunnel,
                                    args=(relay_host, int(relay_port), entry['sha256'], entry,
-                                         leaves, file_path, price),
+                                         all_leaves[entry['sha256']], file_path, price),
                                    kwargs={'quiet': True}, daemon=True)
             tt.start()
             self._host_threads.append(tt)
@@ -144,8 +154,12 @@ class DuraShell(cmd.Cmd):
         self._host_threads.append(t)
         price_note = f', {price} sat/download' if price else ', free'
         tunnel_note = f', tunneled via {tunnel}' if tunnel else ''
-        print(f'  hosting {entry["name"]} on port {port} in the background{price_note}{tunnel_note} '
-              f'— shell still usable')
+        if len(entries) == 1:
+            print(f'  hosting {entries[0]["name"]} on port {port} in the background{price_note}'
+                  f'{tunnel_note} — shell still usable')
+        else:
+            print(f'  hosting {len(entries)} files on port {port} in the background{price_note} '
+                  f'— shell still usable')
 
     def do_relay(self, arg):
         """relay [port]  — run a real discovery relay in the background (default port 9101),
