@@ -163,13 +163,23 @@ signing and verification, not simulated):
    outcomes instead of key identity — including PGP's actual historical
    weak point: the crypto is the easy part, "how much do I trust this
    signer" is the unsolved UX problem, not a technical one.
+3. **Revocation** — a signer can kill their own earlier vouch (`sign_revocation`,
+   keyed to the attestation's content-hash `attestation_id`). Only accepted
+   if the revocation's signer matches the original attestation's signer;
+   the revoked attestation stays on record rather than being deleted, so
+   "X vouched for Y, then revoked it" stays an honest, auditable fact
+   instead of quietly disappearing.
 
 Demonstrated for real in one run: a fresh client with zero direct history
 bootstraps a trust score for an unknown peer purely from another client's
 signed vouch; a vouch from a signer you don't trust at all is cryptographically
 valid but contributes zero weight; mutating a signed payload after the fact
 (`passes: 8 → 800`) is caught by signature verification; a 90-day-old
-attestation is worth 0.125x a fresh one under a 30-day trust half-life.
+attestation is worth 0.125x a fresh one under a 30-day trust half-life;
+alice revoking her own vouch drops bob's trust score for that peer without
+bob ever re-verifying it himself; mallory forging a revocation of *alice's*
+vouch (valid signature, wrong signer) is correctly rejected; a revocation
+referencing an attestation nobody's ever seen is rejected too.
 
 ### `lightning_settle.py` + `lightning/` — real Lightning HTLC settlement
 
@@ -277,9 +287,9 @@ test and for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
 6. ~~Point the mechanism at a real `.ott` archive~~ — done,
    `poc_real_archive_challenge.py`: real 217MB video, 3324 real chunks,
    12-step proofs (~400B), confirmed O(log N) not linear.
-7. **Attestation revocation** — signed vouches currently only decay by age;
-   no way to explicitly revoke one for a peer that went bad after being
-   vouched for.
+7. ~~Attestation revocation~~ — done, `poc_reputation.py`: signer-only
+   revocation keyed to `attestation_id`, forged revocation from a different
+   signer correctly rejected, revoked attestation kept on record not deleted.
 8. **Discovery layer** — the actual unsolved, and probably hardest, piece.
    Designed in conversation (gossiped payment attestations, no canonical
    index, Nostr-style pluralized indexers) but nothing built yet.

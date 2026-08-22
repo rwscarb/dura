@@ -14,13 +14,22 @@ mechanisms from the last two Slack messages, actually built.
    Web of Trust model, applied to possession-verification results
    instead of identity.
 
-Demo below runs both real (Ed25519 sign/verify via `cryptography`, not
-faked) and shows the three things that matter: (a) a fresh client with
-zero direct history can bootstrap trust in an unknown peer purely from
-another client's signed vouching, (b) tampering with a signed attestation
-after the fact is caught, (c) an attestation's trust weight decays with
-age instead of being trusted forever.
+3. Revocation: a signer can kill their own earlier vouch — for a peer that
+   went bad after being vouched for, or a vouch that was simply wrong.
+   Only the original signer's key can revoke it (verified by real signature,
+   same as the attestation itself); the revoked attestation stays on record
+   rather than being deleted, so "X vouched for Y, then revoked it" remains
+   an honest, auditable fact instead of quietly disappearing.
+
+Demo below runs all real (Ed25519 sign/verify via `cryptography`, not
+faked) and shows: (a) a fresh client with zero direct history can bootstrap
+trust in an unknown peer purely from another client's signed vouching, (b)
+tampering with a signed attestation after the fact is caught, (c) an
+attestation's trust weight decays with age instead of being trusted
+forever, (d) a signer can revoke their own vouch and it actually moves the
+score, (e) nobody else can forge a revocation of someone else's vouch.
 """
+import hashlib
 import json
 import os
 import time
@@ -59,6 +68,25 @@ class Identity:
         sig = self._priv.sign(payload_bytes)
         return {'payload': payload, 'signature': sig.hex()}
 
+    def sign_revocation(self, target_id, reason='', ts=None):
+        payload = {
+            'type': 'revocation',
+            'signer_pubkey': self.pubkey_hex(),
+            'revokes': target_id,
+            'reason': reason,
+            'ts': ts if ts is not None else time.time(),
+        }
+        payload_bytes = json.dumps(payload, sort_keys=True).encode()
+        sig = self._priv.sign(payload_bytes)
+        return {'payload': payload, 'signature': sig.hex()}
+
+
+def attestation_id(attestation):
+    """Stable content-hash identifier for an attestation, so a revocation can
+    reference exactly which vouch it kills without a central sequence number."""
+    payload_bytes = json.dumps(attestation['payload'], sort_keys=True).encode()
+    return hashlib.sha256(payload_bytes).hexdigest()
+
 
 def verify_attestation(attestation):
     """Real Ed25519 verification against the embedded signer pubkey. Returns
@@ -91,6 +119,7 @@ class ReputationStore:
         self.path = path
         self.direct = {}        # peer_pubkey -> {passes, fails, avg_latency_ms, last_ts}
         self.attestations = []  # list of received signed attestations
+        self.revocations = []   # list of received signed revocations
         self._load()
 
     def _load(self):
@@ -99,10 +128,12 @@ class ReputationStore:
                 data = json.load(f)
             self.direct = data.get('direct', {})
             self.attestations = data.get('attestations', [])
+            self.revocations = data.get('revocations', [])
 
     def save(self):
         with open(self.path, 'w') as f:
-            json.dump({'direct': self.direct, 'attestations': self.attestations}, f, indent=2)
+            json.dump({'direct': self.direct, 'attestations': self.attestations,
+                       'revocations': self.revocations}, f, indent=2)
 
     def record_direct(self, peer_pubkey, passes, fails, avg_latency_ms):
         self.direct[peer_pubkey] = {
@@ -117,18 +148,45 @@ class ReputationStore:
         self.attestations.append(attestation)
         return True, 'accepted'
 
+    def add_revocation(self, revocation):
+        """Only accepted if it's a real signature AND the revoker is the
+        same key that signed the attestation being revoked — otherwise
+        anyone could forge a revocation to silently kill someone else's
+        legitimate vouch. The original attestation is kept (not deleted):
+        'X vouched for Y, then revoked it' stays an honest, auditable fact."""
+        ok, reason = verify_attestation(revocation)
+        if not ok:
+            return False, reason
+        target_id = revocation['payload']['revokes']
+        target = next((a for a in self.attestations if attestation_id(a) == target_id), None)
+        if target is None:
+            return False, 'revokes an attestation this store has never seen'
+        if target['payload']['signer_pubkey'] != revocation['payload']['signer_pubkey']:
+            return False, 'revocation signer does not match the original attestation signer — rejected'
+        self.revocations.append(revocation)
+        return True, 'accepted'
+
+    def _revoked_ids(self):
+        return {r['payload']['revokes'] for r in self.revocations}
+
     def trust_score(self, peer_pubkey, trust_in_signers=None):
         """Direct experience always dominates when present. Otherwise,
-        blend signed attestations weighted by (a) how much I trust that
-        signer and (b) how stale the attestation is."""
+        blend signed, non-revoked attestations weighted by (a) how much I
+        trust that signer and (b) how stale the attestation is."""
         trust_in_signers = trust_in_signers or {}
         if peer_pubkey in self.direct:
             rec = self.direct[peer_pubkey]
             total = rec['passes'] + rec['fails']
             return rec['passes'] / total if total else 0.0, 'direct experience'
 
-        relevant = [a for a in self.attestations if a['payload']['peer_pubkey'] == peer_pubkey]
+        revoked = self._revoked_ids()
+        relevant = [a for a in self.attestations
+                    if a['payload']['peer_pubkey'] == peer_pubkey and attestation_id(a) not in revoked]
+        n_revoked = sum(1 for a in self.attestations
+                         if a['payload']['peer_pubkey'] == peer_pubkey and attestation_id(a) in revoked)
         if not relevant:
+            if n_revoked:
+                return 0.0, f'all {n_revoked} attestation(s) for this peer were revoked by their own signers'
             return 0.0, 'no direct history, no attestations — unknown peer'
 
         num, den = 0.0, 0.0
@@ -145,7 +203,8 @@ class ReputationStore:
             den += w
         if den == 0:
             return 0.0, 'attestations exist but from signers I have zero trust in'
-        return num / den, f'{len(relevant)} attestation(s), weighted by signer trust + age'
+        revoked_note = f', {n_revoked} revoked and excluded' if n_revoked else ''
+        return num / den, f'{len(relevant)} attestation(s){revoked_note}, weighted by signer trust + age'
 
 
 def main():
@@ -204,6 +263,27 @@ def main():
     print(f"  fresh attestation weight: {fresh_weight:.3f}")
     print(f"  90-day-old attestation weight: {old_weight:.3f}  "
           f"(half-life {ATTESTATION_HALF_LIFE_DAYS:.0f}d, so ~3 half-lives in)")
+
+    print("\n=== revocation: alice later learns peer_x went bad, revokes her own vouch ===")
+    target_id = attestation_id(attestation)
+    revocation = alice.sign_revocation(target_id, reason='peer_x failed possession challenges after this vouch')
+    ok, reason = bob_store.add_revocation(revocation)
+    print(f"  bob receives alice's revocation: accepted={ok}  ({reason})")
+    score, why = bob_store.trust_score(peer_x_pubkey, bob_trust_in_signers)
+    print(f"  bob's trust score for peer_x now: {score:.2f}  ({why})")
+    print("  -> dropped without bob ever re-verifying peer_x himself — the original attestation")
+    print("     is still on record (attestation_id present in the JSON below), just excluded.")
+
+    print("\n=== attack test: mallory tries to forge a revocation of ALICE's vouch ===")
+    forged = mallory.sign_revocation(target_id, reason='pretending to be alice')
+    ok, reason = bob_store.add_revocation(forged)
+    print(f"  bob receives mallory's forged revocation: accepted={ok}  ({reason})")
+    print("  -> valid signature (it really is signed by mallory), but signer != original signer, rejected.")
+
+    print("\n=== integrity test: revocation referencing an attestation nobody's seen ===")
+    bogus = alice.sign_revocation('0' * 64, reason='nonexistent target')
+    ok, reason = bob_store.add_revocation(bogus)
+    print(f"  bob receives revocation for an unknown attestation id: accepted={ok}  ({reason})")
 
     alice_store.save()
     bob_store.save()
