@@ -429,6 +429,65 @@ python3 dura.py download <content_hash> --relay http://127.0.0.1:9101 \
 a new wire-protocol verb, backward compatible: a host that doesn't
 implement it just gets treated as free by an older/newer client either way).
 
+### Transitive trust — real attestations flow through the subscribe graph
+
+The gap named right after the auction landed: `select_host` was only ever
+passed *your own* direct history, never other people's signed vouches, so
+a host you'd genuinely never dealt with always scored a flat 0.0 no matter
+who else had already verified it. `poc_reputation.py`'s attestation/
+revocation machinery could support exactly this — it just was never fed
+anything, since attestations were never gossiped through a relay the way
+publish/like/subscribe already were.
+
+Considered adopting real PGP for this (Ryan asked) — decided against it:
+PGP's actual trust-level/path-counting *idea* (marginal vs full trust,
+computed transitively) is worth borrowing, but the OpenPGP *format* is
+built for signing emails, not cheaply gossiping dozens of small JSON
+events, and its classic path to real interoperability — public keyservers
+— reintroduces exactly the single-point-of-failure problem discovery.py's
+relay design exists to avoid. Built the trust-level idea on the Ed25519
+signing already in place instead of adopting the standard.
+
+`build_trust_graph()`: real BFS outward from your own pubkey through real
+signed `subscribe` events pulled from a relay (a subscribe *is* a trust
+edge — same insight from the original discovery-layer design, now actually
+computed transitively instead of 1-hop-only). Trust decays per hop
+(default 0.5×) — a friend counts fully, a friend-of-a-friend counts less.
+Takes the shortest path to each reachable pubkey, not the sum across every
+path — summing would let a sybil ring inflate a target's trust just by
+adding more low-value paths to it.
+
+`download_with_auction` now also pulls real `attestation` events from
+relays (new event type — no relay code changes needed, `discovery_relay.py`
+already verifies and filters by type generically), verifies each one, and
+feeds them into `select_host` alongside the trust graph. And after every
+successful download it publishes its own outcome as a real signed
+attestation, not just recording it locally — so the next person who trusts
+*you*, even transitively, benefits without ever dealing with that host
+first.
+
+Real end-to-end proof, not just the math: identity A downloaded from a
+host directly (0.00 reputation, no history, same as before this change),
+which auto-published a real attestation. A second identity, ROOT, who had
+**never talked to that host**, subscribed to A (one real signed edge), then
+ran `download`:
+
+```
+trust graph: 1 pubkey(s) reachable within 3 hop(s) of your own subscribes
+pulled 1/1 real attestation(s) from relays (others' vouches, weighted by your trust in whoever signed them)
+  + 127.0.0.1:9204: possession verified (3/3 chunks), price=0 sat, reputation=1.00 (1 attestation(s), weighted by signer trust + age), avg_latency=0.4ms
+```
+
+Would've been a flat `reputation=0.00` before this change — ROOT had zero
+direct history with the host. Instead it inherited A's real, already-
+verified experience through one real hop of trust. Byte-identical download
+confirmed via `cmp`, same as every other download in this repo.
+
+Separately verified the decay math itself against a real 3-hop chain
+(root→A→B→C) plus a disconnected stranger: `A=0.5, B=0.25, C=0.125`,
+stranger absent from the graph entirely, `max_hops` correctly bounding how
+far it searches — exact, not approximate.
+
 ### `shell.py` — interactive, tab-completing, same pattern as `ott`'s shell
 
 `python3 dura.py` with no arguments (or `dura.py shell`) drops into an

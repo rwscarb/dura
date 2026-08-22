@@ -260,10 +260,50 @@ def discover_hosts_for(relay_urls, content_hash):
     return [p for p in discover(relay_urls) if p['content_hash'].startswith(content_hash)]
 
 
-def select_host(candidates, k=3, reputation=None):
+def build_trust_graph(subscribe_events, root_pubkey, max_hops=3, decay=0.5):
+    """Transitive trust, computed here instead of adopting PGP's standard
+    to get it: BFS outward from root_pubkey through real signed subscribe
+    events (each one a real trust edge — 'I subscribe to X' = 'I trust
+    X'). Trust decays per hop, same shape as PGP's marginal-vs-full
+    distinction (a direct subscribe counts more than a friend-of-a-
+    friend), computed on the Ed25519 events already in place rather than
+    needing the OpenPGP format at all.
+
+    Takes the *shortest* path to each reachable pubkey (first time BFS
+    reaches it), not the sum across every path that reaches it — summing
+    would let a sybil ring inflate a target's trust just by adding more
+    low-value paths to it, which defeats the point of a hop-decayed graph
+    in the first place."""
+    edges = {}
+    for e in subscribe_events:
+        p = e['payload']
+        edges.setdefault(p['signer_pubkey'], set()).add(p['target_pubkey'])
+
+    trust = {}
+    frontier = [root_pubkey]
+    seen = {root_pubkey}
+    hop = 0
+    while frontier and hop < max_hops:
+        hop += 1
+        weight = decay ** hop
+        next_frontier = []
+        for node in frontier:
+            for target in edges.get(node, ()):
+                if target not in seen:
+                    seen.add(target)
+                    trust[target] = weight
+                    next_frontier.append(target)
+        frontier = next_frontier
+    return trust
+
+
+def select_host(candidates, k=3, reputation=None, trust_in_signers=None):
     """Gate on real possession, then rank survivors by reputation then
     price — same 'challenge gates the auction' shape as
-    poc_challenge_auction.py's naive-vs-gated comparison."""
+    poc_challenge_auction.py's naive-vs-gated comparison. trust_in_signers
+    (from build_trust_graph) lets a candidate with zero *direct* history
+    still score above 0 if someone in the caller's transitive trust graph
+    has attested to it."""
     from ott import merkle_root
 
     scored = []
@@ -284,7 +324,8 @@ def select_host(candidates, k=3, reputation=None):
             print(f"  x {c['host']}: failed possession challenge ({k} chunks sampled) — skipping")
             continue
         price = get_price(host, port)
-        rep_score, rep_why = reputation.trust_score(c['signer_pubkey']) if reputation else (0.5, 'no reputation store')
+        rep_score, rep_why = (reputation.trust_score(c['signer_pubkey'], trust_in_signers)
+                               if reputation else (0.5, 'no reputation store'))
         avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
         print(f"  + {c['host']}: possession verified ({k}/{k} chunks), price={price} sat, "
               f"reputation={rep_score:.2f} ({rep_why}), avg_latency={avg_latency:.1f}ms")
@@ -297,20 +338,56 @@ def select_host(candidates, k=3, reputation=None):
     return scored[0]
 
 
-def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_lightning=False):
+def fetch_verified(relay_urls, event_type):
+    """Fetch+verify every event of a type across relays, deduped by event
+    id — same merge pattern discover() uses, generalized so subscribe/
+    attestation gossip go through the same real signature-checking path."""
+    seen = {}
+    for relay_url in relay_urls:
+        events = fetch_events(relay_url, event_type)
+        if events is None:
+            continue
+        for e in events:
+            ok, _ = verify_attestation(e)
+            if ok:
+                seen[attestation_id(e)] = e
+    return list(seen.values())
+
+
+def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_lightning=False,
+                           trust_hops=3, trust_decay=0.5):
     """The real end-to-end path: resolve every host claiming to have this
-    content, challenge-gate them, auction among survivors, optionally pay
-    the winner over a real Lightning HTLC, download, and record the
-    outcome to local reputation for next time."""
+    content, challenge-gate them, auction among survivors — weighted by
+    reputation built from real transitive trust (your own subscribes, plus
+    your subscribes' subscribes, decayed per hop) and real attestations
+    gossiped from relays, not just your own direct history — optionally
+    pay the winner over a real Lightning HTLC, download, record the
+    outcome locally AND publish it so others can benefit transitively too."""
     from poc_reputation import ReputationStore
 
+    identity = load_or_create_identity()
     candidates = discover_hosts_for(relay_urls, content_hash)
     if not candidates:
         sys.exit(f"no hosts found publishing content matching {content_hash}")
     print(f"found {len(candidates)} candidate host(s) for {content_hash[:16]}...")
 
+    subscribe_events = fetch_verified(relay_urls, 'subscribe')
+    trust_graph = build_trust_graph(subscribe_events, identity.pubkey_hex(),
+                                     max_hops=trust_hops, decay=trust_decay)
+    print(f"trust graph: {len(trust_graph)} pubkey(s) reachable within {trust_hops} hop(s) "
+          f"of your own subscribes")
+
     reputation = ReputationStore(os.path.expanduser('~/.dura_reputation.json'))
-    winner = select_host(candidates, k=k, reputation=reputation)
+    attestation_events = fetch_verified(relay_urls, 'attestation')
+    added = 0
+    for e in attestation_events:
+        ok, _ = reputation.add_attestation(e)
+        added += ok
+    if attestation_events:
+        print(f"pulled {added}/{len(attestation_events)} real attestation(s) from relays "
+              f"(others' vouches, weighted by your trust in whoever signed them)")
+
+    winner = select_host(candidates, k=k, reputation=reputation, trust_in_signers=trust_graph)
     if winner is None:
         sys.exit("no candidate host passed the possession challenge — "
                  "refusing to download from an unverified source")
@@ -338,6 +415,14 @@ def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_ligh
     reputation.save()
     print(f"recorded this download in local reputation store "
           f"(~/.dura_reputation.json) for {c['signer_pubkey'][:12]}...")
+
+    attestation = identity.sign_event('attestation', peer_pubkey=c['signer_pubkey'],
+                                       passes=1, fails=0, avg_latency_ms=winner['avg_latency_ms'], k=k)
+    for relay_url in relay_urls:
+        post_event(relay_url, attestation)
+    print(f"published this outcome as a real attestation — anyone who trusts you "
+          f"(directly or transitively) now benefits from it too, without dealing with "
+          f"{c['signer_pubkey'][:12]}... themselves first")
     return path
 
 
