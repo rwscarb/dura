@@ -221,6 +221,7 @@ class DuraShell(cmd.Cmd):
     def do_r(self, arg): return self.do_relay(arg)
     def do_disc(self, arg): return self.do_discover(arg)
     def do_dl(self, arg): return self.do_download(arg)
+    def do_get(self, arg): return self.do_download(arg)
     def do_l(self, arg): return self.do_like(arg)
     def do_sub(self, arg): return self.do_subscribe(arg)
 
@@ -236,6 +237,9 @@ class DuraShell(cmd.Cmd):
         return self._known_hashes(text)
 
     def complete_dl(self, *a):
+        return self.complete_download(*a)
+
+    def complete_get(self, *a):
         return self.complete_download(*a)
 
     def complete_like(self, text, line, begidx, endidx):

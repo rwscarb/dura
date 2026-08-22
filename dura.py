@@ -80,8 +80,9 @@ def build_parser():
     p_discover.add_argument('--relay', action='append', default=['http://127.0.0.1:9101'],
                              help='relay URL to query (repeatable)')
 
-    p_download = sub.add_parser('download', help='discover, possession-challenge, auction, optionally pay, '
-                                                   'and download from the winning host — chunk-verified')
+    p_download = sub.add_parser('download', aliases=['get'],
+                                 help='discover, possession-challenge, auction, optionally pay, '
+                                      'and download from the winning host — chunk-verified')
     p_download.add_argument('content_hash', nargs='?', help='content hash to resolve via --relay')
     p_download.add_argument('--from', dest='from_addr', help='host:port to connect to directly, skipping '
                              'discovery/auction entirely (no possession challenge, no reputation, no payment)')
@@ -164,7 +165,7 @@ def cmd_subscribe(args):
 
 NATIVE_COMMANDS = {
     'whoami': cmd_whoami, 'host': cmd_host, 'discover': cmd_discover,
-    'download': cmd_download, 'like': cmd_like, 'subscribe': cmd_subscribe,
+    'download': cmd_download, 'get': cmd_download, 'like': cmd_like, 'subscribe': cmd_subscribe,
 }
 
 
