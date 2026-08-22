@@ -299,6 +299,62 @@ relays are plural. Same limitation a real Nostr relay dying would have.
 python3 poc_discovery.py
 ```
 
+### `node.py` — the integration piece: host, discover, download, for real
+
+Everything above is a demo of one mechanism at a time. `node.py` (via
+`dura.py host/discover/download/like/subscribe/whoami`) is the actual
+integration: a real node that hosts a real archived file over the real
+wire protocol from `poc_network_challenge.py` (extended with `INFO` and
+`LEAVES` so a downloader can learn the archive's shape first), announces
+itself on a real relay, and — new, not just wired from existing pieces —
+actually downloads a file from a peer and reassembles it on disk, which
+nothing before this verified chunk-by-chunk *and* wrote a real file.
+
+A persistent identity now lives at `~/.dura_identity.key` — every other
+script tonight generated a fresh Ed25519 keypair per run, which is fine for
+a demo but means nobody could ever accumulate reputation or be subscribed
+to across invocations. A real node needs a stable pubkey.
+
+Real end-to-end run: hosted the real 217MB video, discovered it from a
+separate process, downloaded it to a new path, and diffed the result
+against the original with `cmp` (not just checking the tool's own claim of
+success) — byte-for-byte identical, matching SHA256 on both sides, 3324
+chunks downloaded and verified in 1.3s.
+
+Caught a real bug doing this, not a clean pass on the first try: `ott`
+records a video's `sha256` manifest field as the **Merkle root** over its
+chunk hashes (`digest = merkle_root(chunks)` in `ott.py`'s `cmd_add`), not
+a linear whole-file hash — my first version streamed a plain
+`hashlib.sha256()` over the received bytes and compared that, which does
+not and structurally cannot equal a Merkle root. Every individual chunk
+was verifying correctly the whole time; only the final whole-file check
+was comparing the wrong thing. Fixed by recomputing the Merkle root over
+the received leaves and checking it against the host's advertised
+`sha256` — done *before* downloading any chunk, not after, so a host lying
+about its own archive gets caught immediately instead of after wasting
+bandwidth on it.
+
+```bash
+# terminal 1
+python3 discovery_relay.py 9101
+
+# terminal 2 — host the video from item 6
+python3 dura.py host real_archive --port 9201 --relay http://127.0.0.1:9101
+
+# terminal 3
+python3 dura.py whoami
+python3 dura.py discover --relay http://127.0.0.1:9101
+python3 dura.py download <content_hash_prefix> --relay http://127.0.0.1:9101 --out downloaded.mp4
+python3 dura.py like <content_hash> --relay http://127.0.0.1:9101
+python3 dura.py subscribe <target_pubkey> --relay http://127.0.0.1:9101
+```
+
+`--advertise-host` on `host` matters if you're not on localhost — no NAT
+traversal here, it just tells the relay what address to hand out, real
+reachability is on you. Same point-to-point-known-address limitation
+named earlier in this README, now visible as an actual CLI flag instead of
+just a caveat in prose.
+
 ## Running it
 
 `./dura.py --help` (or `dura.py lightning --help` for the nested ones) is
@@ -354,8 +410,11 @@ for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
    anything posted only to the dead relay doesn't — redundancy isn't free).
 
 Every item on the original roadmap is now built and verified against real
-output, not just designed. What's left is scaling and hardening this, not
-proving the mechanisms work — see each section above for the honest edges
-(loopback timing separation isn't airtight without averaging, relay death
-loses non-redundant data, RunPod flakiness, etc.) that are still real
+output, not just designed — and `node.py` (below) wires host/discover/
+download/like/subscribe into one real tool instead of six disconnected
+demos. What's left is scaling and hardening this, not proving the
+mechanisms work — see each section above for the honest edges (loopback
+timing separation isn't airtight without averaging, relay death loses
+non-redundant data, RunPod flakiness, regtest-only Lightning, still no
+real P2P/DHT discovery or NAT traversal, no UI) that are still real
 constraints even though the core ideas held up.
