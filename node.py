@@ -679,6 +679,14 @@ def post_event(relay_url, event):
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return json.loads(e.read())
+    except (urllib.error.URLError, ConnectionRefusedError) as e:
+        # download_with_auction posts the post-download attestation to every
+        # relay in relay_urls, which by default includes 127.0.0.1:9101
+        # whether or not anything is actually listening there (same default
+        # fetch_events already tolerates) — an unreachable relay here used to
+        # take down the whole download with an uncaught traceback *after* the
+        # file was already correctly written and reputation already recorded
+        return {'ok': False, 'error': str(e)}
 
 
 def fetch_events(relay_url, event_type=None):
