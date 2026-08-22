@@ -68,6 +68,7 @@ def recv_line(sock):
 
 
 def find_manifest_entry(archive_dir, file_name=None):
+    archive_dir = os.path.expanduser(archive_dir)  # os.path.join never expands ~, it stays literal
     manifest_path = os.path.join(archive_dir, '.ott', 'manifest.jsonl')
     if not os.path.exists(manifest_path):
         sys.exit(f"no .ott/manifest.jsonl in {archive_dir} — archive a file with ott first")
@@ -81,12 +82,14 @@ def find_manifest_entry(archive_dir, file_name=None):
 
 
 def load_leaves(archive_dir, root_hash):
+    archive_dir = os.path.expanduser(archive_dir)
     chunks_path = os.path.join(archive_dir, '.ott', 'chunks', f'{root_hash}.json')
     with open(chunks_path) as f:
         return json.load(f)
 
 
 def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0'):
+    archive_dir = os.path.expanduser(archive_dir)
     entry = find_manifest_entry(archive_dir, file_name)
     leaves = load_leaves(archive_dir, entry['sha256'])
     file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
@@ -143,6 +146,7 @@ def _request(host, port, line, timeout=10):
 def download(host, port, out_path):
     from ott import merkle_root  # pip install btcvm
 
+    out_path = os.path.expanduser(out_path)
     info = json.loads(_request(host, port, 'INFO'))
     print(f"downloading {info['name']} ({info['size']:,} bytes, {info['n_chunks']} chunks) "
           f"from {host}:{port}")
