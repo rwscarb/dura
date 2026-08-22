@@ -24,13 +24,17 @@ solved plumbing. The two things that actually kill projects like this:
 
 ### `poc_challenge_auction.py` — possession-gated reverse auction
 
-`merkle_root`/`merkle_proof`/`verify_proof` are vendored byte-for-byte from
-[rwscarb/btcvm](https://github.com/rwscarb/btcvm)'s `ott.py` — the same
-functions `ott verify-chunk` runs locally, copied in rather than imported so
-this repo has no dependency outside itself. `btcvm` (source, including
-`ott`) is also [published on PyPI](https://pypi.org/project/btcvm/) now —
-`pip install btcvm` — if you want the real CLI rather than just these three
-vendored functions.
+`merkle_root`/`merkle_proof`/`verify_proof` are imported from the real,
+[published](https://pypi.org/project/btcvm/) `btcvm` package (`pip install
+btcvm`) — same functions `ott verify-chunk` runs locally. Used to be
+vendored copies (kept this repo dependency-free before btcvm was on PyPI);
+now that it's real and installable, this repo depends on it properly
+instead. `ott` is the storage/archive layer — what you have and can prove
+you have; this repo is the distribution/incentive layer built on top of
+it. Deliberately kept as separate packages rather than merged: `ott` stays
+the stable, already-published tool with real users, this stays free to be
+a rougher-edged PoC without dragging Lightning/Docker into `ott`'s
+dependency surface.
 
 In-process simulation, five peers, one 8-chunk file.
 
@@ -316,11 +320,14 @@ python3 poc_real_archive_challenge.py           # same challenge mechanism, real
 python3 poc_discovery.py                        # 3 real relays, personalized ranking, sybil test
 ```
 
-Self-contained — no dependency outside this repo. Needs `cryptography` and
-`matplotlib` (`pip install cryptography matplotlib`) for the reputation demo
-and the chart; `poc_network_challenge.py` and `poc_challenge_auction.py` are
-pure stdlib on their own. Docker/Compose needed for the container-network
-test and for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
+`pip install -r requirements.txt` gets everything (`btcvm`, `cryptography`,
+`matplotlib`). Broken down: `poc_challenge_auction.py` (and
+`poc_real_archive_challenge.py`, which imports from it) needs `btcvm`;
+`poc_reputation.py` and `poc_discovery.py` (which imports from it) need
+`cryptography`; `viz_challenge_separation.py` needs `matplotlib`.
+`poc_network_challenge.py` and `discovery_relay.py` are pure stdlib, no
+install needed. Docker/Compose needed for the container-network test and
+for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
 
 ## Next steps
 

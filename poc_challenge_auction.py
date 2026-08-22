@@ -6,9 +6,15 @@ Validates the mechanism from the #all-pdx brainstorm: only peers who can
 produce a valid Merkle proof for a randomly-challenged chunk are allowed to
 bid to serve a file; cheapest verified bid wins.
 
-merkle_root/merkle_proof/verify_proof below are vendored byte-for-byte from
-rwscarb/btcvm's ott.py (same functions `ott verify-chunk` runs locally) —
-copied rather than imported so this repo has no dependency outside itself.
+merkle_root/merkle_proof/verify_proof are imported straight from the real
+`btcvm` package (`pip install btcvm` — https://pypi.org/project/btcvm/,
+same functions `ott verify-chunk` runs locally) — a real dependency now
+that btcvm is actually published, not vendored copies. `ott` is the
+storage/archive layer (what you have and can prove you have); this repo is
+the distribution/incentive layer built on top of it — keeping them as
+separate packages rather than merging means ott stays the stable,
+already-published tool and this stays free to be a rougher-edged PoC.
+
 Everything runs in one process with in-memory "peers" — no real network.
 Auction winners settle with a mock print by default; pass --lightning to
 settle with a real Lightning HTLC instead (see lightning_settle.py and
@@ -19,53 +25,7 @@ import os
 import random
 import sys
 
-
-# ── vendored from btcvm/ott.py ────────────────────────────────────────────
-def merkle_root(leaves: list[str]) -> str:
-    if not leaves:
-        return '0' * 64
-    layer = list(leaves)
-    while len(layer) > 1:
-        if len(layer) % 2:
-            layer.append(layer[-1])
-        layer = [
-            hashlib.sha256((layer[i] + layer[i + 1]).encode()).hexdigest()
-            for i in range(0, len(layer), 2)
-        ]
-    return layer[0]
-
-
-def merkle_proof(leaves: list[str], index: int) -> list[dict]:
-    proof = []
-    layer = list(leaves)
-    idx = index
-    while len(layer) > 1:
-        if len(layer) % 2:
-            layer.append(layer[-1])
-        sibling_idx = idx ^ 1
-        proof.append({
-            'sibling': layer[sibling_idx],
-            'side': 'right' if idx % 2 == 0 else 'left',
-        })
-        layer = [
-            hashlib.sha256((layer[i] + layer[i + 1]).encode()).hexdigest()
-            for i in range(0, len(layer), 2)
-        ]
-        idx //= 2
-    return proof
-
-
-def verify_proof(leaf: str, proof: list[dict], root: str) -> bool:
-    h = leaf
-    for step in proof:
-        sib = step['sibling']
-        if step['side'] == 'right':
-            h = hashlib.sha256((h + sib).encode()).hexdigest()
-        else:
-            h = hashlib.sha256((sib + h).encode()).hexdigest()
-    return h == root
-# ── end vendored section ──────────────────────────────────────────────────
-
+from ott import merkle_root, merkle_proof, verify_proof  # pip install btcvm
 
 CHUNK_SIZE = 262144  # matches OTT_CHUNK_BYTES default
 N_CHUNKS = 8
