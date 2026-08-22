@@ -199,6 +199,49 @@ Full setup steps in `lightning/README.md` — real bitcoind + LND takes a
 one-time channel-funding setup regtest can't skip (mine to coinbase
 maturity, open a channel, mine confirmations) before it's usable.
 
+### `poc_real_archive_challenge.py` — real `.ott` archive, real video, real scale
+
+Every other PoC file here used `os.urandom` fake chunks (8 of them).
+This one points the same mechanism at a real 217MB video, archived with the
+real `ott` CLI at a real 64KB chunk size:
+
+```
+real archive: real_video.mp4, 217,831,234 bytes, 3324 real chunks x 65536 bytes
+recomputed Merkle root matches ott's own commit: True
+```
+
+The thing this was actually checking — proof size at real scale:
+
+```
+chunk     0: 12 steps, 396B raw, 1176B as JSON
+chunk  1662: 12 steps, 396B raw, 1168B as JSON
+chunk  3323: 12 steps, 396B raw, 1167B as JSON
+```
+
+12 proof steps at 3324 real chunks vs. 3 steps at the toy 8-chunk scale —
+exactly log2(N), not linear, confirmed with real numbers instead of just
+trusting the math. Even a 2-hour movie at these settings (~10GB, ~163,840
+64KB chunks) would only need ~17 steps, still under 1KB. Then ran the same
+nonce-salted-challenge logic from `poc_challenge_auction.py` Part 2 against
+real bytes read straight off disk at real offsets — all 5 real rounds
+checked out: hash matches ott's own committed leaf, Merkle proof verifies,
+nonce response is internally consistent.
+
+`real_archive/real_video.mp4` isn't committed to this repo (208MB, and it's
+not this repo's to redistribute) — `real_archive/.ott/`'s metadata is
+tracked, so the chunk list and commitment are there for inspection even
+without the video itself. Reproduce with any file:
+
+```bash
+cd real_archive
+python3 /path/to/btcvm/ott.py init
+# edit .ott/config, set "chunk_size" to whatever you want (65536 used here)
+python3 /path/to/btcvm/ott.py add your_video.mp4
+python3 /path/to/btcvm/ott.py commit
+cd ..
+python3 poc_real_archive_challenge.py
+```
+
 ## Running it
 
 ```bash
@@ -210,6 +253,7 @@ python3 viz_challenge_separation.py       # regenerates the chart above from fre
 docker compose up --build --abort-on-container-exit verifier   # same test, real containers
 cd lightning && docker compose up -d && cd ..   # real bitcoind + 2 LND nodes (see lightning/README.md for setup)
 python3 poc_challenge_auction.py --lightning    # same auction, real HTLC settlement
+python3 poc_real_archive_challenge.py           # same challenge mechanism, real 3324-chunk video
 ```
 
 Self-contained — no dependency outside this repo. Needs `cryptography` and
@@ -230,9 +274,9 @@ test and for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
    preimage reveal independently re-verified). Regtest, not public testnet —
    same reasoning as #4: real protocol code, skip the wait on chain
    sync/faucets.
-6. **Point the mechanism at a real `.ott` archive** instead of `os.urandom`
-   fake chunks — confirm Merkle proof size stays cheap at real video scale
-   (thousands of chunks, not 8).
+6. ~~Point the mechanism at a real `.ott` archive~~ — done,
+   `poc_real_archive_challenge.py`: real 217MB video, 3324 real chunks,
+   12-step proofs (~400B), confirmed O(log N) not linear.
 7. **Attestation revocation** — signed vouches currently only decay by age;
    no way to explicitly revoke one for a peer that went bad after being
    vouched for.
