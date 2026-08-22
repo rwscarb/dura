@@ -9,14 +9,15 @@ bid to serve a file; cheapest verified bid wins.
 merkle_root/merkle_proof/verify_proof below are vendored byte-for-byte from
 rwscarb/btcvm's ott.py (same functions `ott verify-chunk` runs locally) —
 copied rather than imported so this repo has no dependency outside itself.
-Everything runs in one process with in-memory "peers" — no real network,
-no real Lightning. The point is to validate the mechanism's logic (fraud
-gets caught, the auction only ever sees verified bidders) before spending
-time on an actual libp2p/BitTorrent + Lightning implementation.
+Everything runs in one process with in-memory "peers" — no real network.
+Auction winners settle with a mock print by default; pass --lightning to
+settle with a real Lightning HTLC instead (see lightning_settle.py and
+lightning/docker-compose.yml — needs that stack up first).
 """
 import hashlib
 import os
 import random
+import sys
 
 
 # ── vendored from btcvm/ott.py ────────────────────────────────────────────
@@ -120,7 +121,7 @@ def naive_price_auction(peers):
     print(f"  -> naive winner: {winner.name} — cheapest bid wins regardless of whether they can deliver")
 
 
-def challenge_round(round_n, peers, idx, leaves, root):
+def challenge_round(round_n, peers, idx, leaves, root, lightning=None):
     print(f"\n=== ROUND {round_n}: challenge chunk #{idx} (root {root[:12]}...) ===")
     survivors = []
     for p in peers:
@@ -145,8 +146,21 @@ def challenge_round(round_n, peers, idx, leaves, root):
     for p, price in sorted(bids.items(), key=lambda kv: kv[1]):
         print(f"    bid: {p.name:10s}  {price:6.2f} sat/chunk")
     winner = min(bids, key=bids.get)
-    print(f"  -> WINNER: {winner.name} at {bids[winner]:.2f} sat/chunk "
-          f"(settlement: mock Lightning HTLC held until delivery confirms)")
+
+    if lightning is not None:
+        memo = f'ott auction round {round_n}: chunk #{idx}, winner {winner.name}'
+        try:
+            result = lightning.settle(bids[winner], memo)
+            print(f"  -> WINNER: {winner.name} at {bids[winner]:.2f} sat/chunk "
+                  f"(settled: real HTLC, {result['amount_sat']} sat, "
+                  f"preimage {result['preimage'][:12]}... verified against "
+                  f"payment_hash {result['payment_hash'][:12]}...)")
+        except lightning.SettlementError as e:
+            print(f"  -> WINNER: {winner.name} at {bids[winner]:.2f} sat/chunk "
+                  f"(settlement FAILED: {e})")
+    else:
+        print(f"  -> WINNER: {winner.name} at {bids[winner]:.2f} sat/chunk "
+              f"(settlement: mock — run with --lightning for a real HTLC)")
 
 
 class LatentPeer:
@@ -197,6 +211,17 @@ def nonce_challenge_round(round_n, peers, idx, leaves, chunks):
 
 
 def main():
+    lightning = None
+    if '--lightning' in sys.argv:
+        import lightning_settle
+        if not lightning_settle.channel_active():
+            print("--lightning requested but no active channel found — "
+                  "bring up lightning/docker-compose.yml first (see lightning/README.md)")
+            sys.exit(1)
+        lightning = lightning_settle
+        print("--lightning: auction winners will be settled with real Lightning HTLCs "
+              "(regtest, real LND nodes, real invoices)\n")
+
     random.seed(1)
     chunks, leaves, root = build_file()
     print(f"file: {N_CHUNKS} chunks x {CHUNK_SIZE} bytes, committed Merkle root {root[:16]}...")
@@ -219,7 +244,7 @@ def main():
 
     for round_n in range(1, N_CHALLENGE_ROUNDS + 1):
         idx = random.randrange(N_CHUNKS)
-        challenge_round(round_n, peers, idx, leaves, root)
+        challenge_round(round_n, peers, idx, leaves, root, lightning=lightning)
 
     print("\n=== strikes after all challenge rounds ===")
     for p in peers:

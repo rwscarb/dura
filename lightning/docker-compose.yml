@@ -1,0 +1,80 @@
+# Real Lightning HTLC settlement for the auction winner, replacing the mock
+# print statement in poc_challenge_auction.py.
+#
+# Runs on regtest, not public testnet — same reason PoC 4's WAN test used a
+# real remote box instead of a simulated one: this is real bitcoind + real
+# LND (Lightning Labs' production node software), executing the real BOLT11
+# invoice / HTLC hash-lock protocol. Regtest instead of testnet only because
+# it doesn't require waiting on public chain sync or faucet funds — the
+# Lightning protocol code path is identical either way. Images are Polar's
+# (lightningpolar.com) — the standard tool for exactly this local-regtest-
+# Lightning-network use case; reused rather than hand-rolled.
+
+services:
+  bitcoind:
+    image: polarlightning/bitcoind:26.0
+    command:
+      - "bitcoind"
+      - "-regtest"
+      - "-server=1"
+      - "-rpcuser=polaruser"
+      - "-rpcpassword=polarpass"
+      - "-debug=1"
+      - "-zmqpubrawblock=tcp://0.0.0.0:28334"
+      - "-zmqpubrawtx=tcp://0.0.0.0:28335"
+      - "-txindex=1"
+      - "-dnsseed=0"
+      - "-upnp=0"
+      - "-rpcbind=0.0.0.0"
+      - "-rpcallowip=0.0.0.0/0"
+      - "-rpcport=18443"
+      - "-rest"
+      - "-listen=1"
+      - "-listenonion=0"
+      - "-fallbackfee=0.0002"
+
+  lnd-alice:
+    image: polarlightning/lnd:0.18.0-beta
+    command:
+      - "lnd"
+      - "--noseedbackup"
+      - "--trickledelay=5000"
+      - "--alias=alice"
+      - "--externalip=lnd-alice"
+      - "--tlsextradomain=lnd-alice"
+      - "--listen=0.0.0.0:9735"
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+      - "--bitcoin.active"
+      - "--bitcoin.regtest"
+      - "--bitcoin.node=bitcoind"
+      - "--bitcoind.rpchost=bitcoind:18443"
+      - "--bitcoind.rpcuser=polaruser"
+      - "--bitcoind.rpcpass=polarpass"
+      - "--bitcoind.zmqpubrawblock=tcp://bitcoind:28334"
+      - "--bitcoind.zmqpubrawtx=tcp://bitcoind:28335"
+    depends_on:
+      - bitcoind
+
+  lnd-bob:
+    image: polarlightning/lnd:0.18.0-beta
+    command:
+      - "lnd"
+      - "--noseedbackup"
+      - "--trickledelay=5000"
+      - "--alias=bob"
+      - "--externalip=lnd-bob"
+      - "--tlsextradomain=lnd-bob"
+      - "--listen=0.0.0.0:9735"
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+      - "--bitcoin.active"
+      - "--bitcoin.regtest"
+      - "--bitcoin.node=bitcoind"
+      - "--bitcoind.rpchost=bitcoind:18443"
+      - "--bitcoind.rpcuser=polaruser"
+      - "--bitcoind.rpcpass=polarpass"
+      - "--bitcoind.zmqpubrawblock=tcp://bitcoind:28334"
+      - "--bitcoind.zmqpubrawtx=tcp://bitcoind:28335"
+    depends_on:
+      - bitcoind

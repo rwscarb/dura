@@ -171,6 +171,34 @@ valid but contributes zero weight; mutating a signed payload after the fact
 (`passes: 8 → 800`) is caught by signature verification; a 90-day-old
 attestation is worth 0.125x a fresh one under a 30-day trust half-life.
 
+### `lightning_settle.py` + `lightning/` — real Lightning HTLC settlement
+
+Replaces `poc_challenge_auction.py`'s mock "settlement" print with a real
+one: two real LND nodes (Lightning Labs' production node software) on
+regtest, real bitcoind backing them, a real funded channel between them.
+`poc_challenge_auction.py --lightning` settles every auction round's winner
+with a genuine BOLT11 invoice + HTLC — not simulated, and not just trusting
+LND's own "SUCCEEDED" status: `lightning_settle.py` independently re-hashes
+the revealed preimage and checks it against the invoice's payment_hash
+locally before calling it settled.
+
+Real run, 5 winning rounds, real preimages each verified against their own
+payment hash:
+
+```
+WINNER: bob      9 sat   preimage 4ac71143706b...  payment_hash d1be1130c553...
+WINNER: bob      5 sat   preimage eea88d802d1a...  payment_hash 8acabea4ddf7...
+WINNER: bob      6 sat   preimage 76f1ade0f9be...  payment_hash f9c9bda28be0...
+WINNER: bob     10 sat   preimage 96e696c1cde9...  payment_hash f8eeb66d1878...
+WINNER: mallory  1 sat   preimage 508385841cb3...  payment_hash 1c2872b6018f...
+```
+
+Bob's cumulative channel balance after the run matched the sum of every
+settled payment exactly, checked directly against LND rather than assumed.
+Full setup steps in `lightning/README.md` — real bitcoind + LND takes a
+one-time channel-funding setup regtest can't skip (mine to coinbase
+maturity, open a channel, mine confirmations) before it's usable.
+
 ## Running it
 
 ```bash
@@ -180,12 +208,15 @@ python3 poc_network_challenge.py stats    # real sockets, repeated-challenge sep
 python3 poc_reputation.py                 # real Ed25519 signing/verification demo
 python3 viz_challenge_separation.py       # regenerates the chart above from fresh data
 docker compose up --build --abort-on-container-exit verifier   # same test, real containers
+cd lightning && docker compose up -d && cd ..   # real bitcoind + 2 LND nodes (see lightning/README.md for setup)
+python3 poc_challenge_auction.py --lightning    # same auction, real HTLC settlement
 ```
 
 Self-contained — no dependency outside this repo. Needs `cryptography` and
 `matplotlib` (`pip install cryptography matplotlib`) for the reputation demo
 and the chart; `poc_network_challenge.py` and `poc_challenge_auction.py` are
-pure stdlib. Docker/Compose needed only for the container-network test.
+pure stdlib on their own. Docker/Compose needed for the container-network
+test and for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
 
 ## Next steps
 
@@ -194,8 +225,11 @@ pure stdlib. Docker/Compose needed only for the container-network test.
 3. ~~Local reputation + signed portable attestations~~ — done, `poc_reputation.py`
 4. ~~Real WAN calibration against an actual second machine~~ — done, real
    RunPod box over an SSH tunnel: ~1700x gap, separates at k=1
-5. **Real testnet Lightning HTLC settlement**, replacing the mock
-   "settlement" print statement in the auction.
+5. ~~Real Lightning HTLC settlement~~ — done, `lightning_settle.py` +
+   `lightning/` (real bitcoind + 2 LND nodes, real BOLT11 invoices, real
+   preimage reveal independently re-verified). Regtest, not public testnet —
+   same reasoning as #4: real protocol code, skip the wait on chain
+   sync/faucets.
 6. **Point the mechanism at a real `.ott` archive** instead of `os.urandom`
    fake chunks — confirm Merkle proof size stays cheap at real video scale
    (thousands of chunks, not 8).
