@@ -68,6 +68,22 @@ class Identity:
         sig = self._priv.sign(payload_bytes)
         return {'payload': payload, 'signature': sig.hex()}
 
+    def sign_event(self, event_type, ts=None, **fields):
+        """General-purpose signed event — same shape as attestations/
+        revocations, used by discovery_relay.py/poc_discovery.py for
+        publish/like/subscribe events. Kept generic rather than one method
+        per event type since a relay never needs to know the field schema,
+        only that the signature is real."""
+        payload = {
+            'type': event_type,
+            'signer_pubkey': self.pubkey_hex(),
+            'ts': ts if ts is not None else time.time(),
+            **fields,
+        }
+        payload_bytes = json.dumps(payload, sort_keys=True).encode()
+        sig = self._priv.sign(payload_bytes)
+        return {'payload': payload, 'signature': sig.hex()}
+
     def sign_revocation(self, target_id, reason='', ts=None):
         payload = {
             'type': 'revocation',

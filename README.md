@@ -252,6 +252,49 @@ cd ..
 python3 poc_real_archive_challenge.py
 ```
 
+### `discovery_relay.py` + `poc_discovery.py` — discovery, no canonical index
+
+The last unsolved piece from the original brainstorm, actually built: no
+single "trending" list, no server whose seizure kills discoverability.
+Three independent relay processes (`discovery_relay.py` — real stdlib
+`http.server`, no deps), each deliberately dumb: verifies a posted event's
+signature (a relay won't store garbage) but has zero opinion on content
+quality, zero ranking logic. A creator (carol) publishes a real event
+pointing at the real video's real Merkle root from item 6. Viewers like it
+and subscribe to each other, spread across the three relays — nobody posts
+to all three, on purpose.
+
+Two clients, `bob` (subscribes to dan + erin) and `mallory` (subscribes to
+frank only), each query all three relays, verify every event's signature
+themselves (never trust a relay's word for it), and compute their own
+ranking from their own subscribe graph — subscriptions *are* the trust
+graph, not a separate feature, same insight from the Slack thread now
+actually running as code:
+
+```
+same 27 gossiped events, both clients saw all 23 likes (3 honest + 20 sybil),
+but scored the content differently — 2.0 (bob) vs 1.0 (mallory) — because
+ranking runs on each client's own trust graph, not vote count.
+```
+
+A 20-identity sybil swarm likes the same content — every signature is
+real and individually valid, a relay has no basis to reject any of them —
+and moves neither client's score, because neither bob nor mallory
+subscribes to any of the sybils. Sybil resistance from the trust graph,
+not from relay-side moderation.
+
+Then relay:9101 — the one carol's publish event and dan's like both
+happened to live on — gets killed outright. Real result, not a clean win:
+the content stays discoverable and rankable (erin's like survived on a
+different relay), but the human-readable title and dan's like are gone for
+good, since neither was posted anywhere else. Redundancy has to be
+deliberate — post to more than one relay — it isn't automatic just because
+relays are plural. Same limitation a real Nostr relay dying would have.
+
+```bash
+python3 poc_discovery.py
+```
+
 ## Running it
 
 ```bash
@@ -264,6 +307,7 @@ docker compose up --build --abort-on-container-exit verifier   # same test, real
 cd lightning && docker compose up -d && cd ..   # real bitcoind + 2 LND nodes (see lightning/README.md for setup)
 python3 poc_challenge_auction.py --lightning    # same auction, real HTLC settlement
 python3 poc_real_archive_challenge.py           # same challenge mechanism, real 3324-chunk video
+python3 poc_discovery.py                        # 3 real relays, personalized ranking, sybil test
 ```
 
 Self-contained — no dependency outside this repo. Needs `cryptography` and
@@ -290,6 +334,15 @@ test and for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
 7. ~~Attestation revocation~~ — done, `poc_reputation.py`: signer-only
    revocation keyed to `attestation_id`, forged revocation from a different
    signer correctly rejected, revoked attestation kept on record not deleted.
-8. **Discovery layer** — the actual unsolved, and probably hardest, piece.
-   Designed in conversation (gossiped payment attestations, no canonical
-   index, Nostr-style pluralized indexers) but nothing built yet.
+8. ~~Discovery layer~~ — done, `discovery_relay.py` + `poc_discovery.py`:
+   3 independent dumb relays, personalized client-side ranking from each
+   client's own subscribe graph, sybil-resistant (20 fake identities move
+   neither client's score), real relay-death test (content survives,
+   anything posted only to the dead relay doesn't — redundancy isn't free).
+
+Every item on the original roadmap is now built and verified against real
+output, not just designed. What's left is scaling and hardening this, not
+proving the mechanisms work — see each section above for the honest edges
+(loopback timing separation isn't airtight without averaging, relay death
+loses non-redundant data, RunPod flakiness, etc.) that are still real
+constraints even though the core ideas held up.
