@@ -27,8 +27,12 @@ solved plumbing. The two things that actually kill projects like this:
 `merkle_root`/`merkle_proof`/`verify_proof` are vendored byte-for-byte from
 [rwscarb/btcvm](https://github.com/rwscarb/btcvm)'s `ott.py` — the same
 functions `ott verify-chunk` runs locally, copied in rather than imported so
-this repo has no dependency outside itself. In-process simulation, five
-peers, one 8-chunk file.
+this repo has no dependency outside itself. `btcvm` (source, including
+`ott`) is also [published on PyPI](https://pypi.org/project/btcvm/) now —
+`pip install btcvm` — if you want the real CLI rather than just these three
+vendored functions.
+
+In-process simulation, five peers, one 8-chunk file.
 
 **Part 1 — chunk-index challenge + auction.** A naive price-only auction picks
 the cheapest bidder regardless of whether they can deliver — and does, in the
