@@ -1,8 +1,10 @@
 .PHONY: help demo network stats chart reputation discovery real-archive \
         containers lightning-up lightning-down lightning-demo lightning-smoke \
-        all-stdlib clean
+        all-stdlib clean install uninstall
 
 PYTHON ?= python3
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
 
 help:
 	@echo "censorship-resistant video PoC — real mechanisms behind the #all-pdx brainstorm"
@@ -31,6 +33,9 @@ help:
 	@echo "  make real-archive   poc_real_archive_challenge.py — real video, real 3324 chunks"
 	@echo ""
 	@echo "  make clean          remove __pycache__, generated chart, tmp reputation stores"
+	@echo ""
+	@echo "  make install        symlink dura.py to $(BINDIR)/dura (override with PREFIX=...)"
+	@echo "  make uninstall      remove $(BINDIR)/dura"
 
 demo:
 	$(PYTHON) poc_challenge_auction.py
@@ -76,3 +81,15 @@ clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +
 	find . -name '*.pyc' -delete
 	rm -f /tmp/poc_rep_alice.json /tmp/poc_rep_bob.json
+
+install:
+	mkdir -p $(BINDIR)
+	ln -sf $(CURDIR)/dura.py $(BINDIR)/dura
+	@echo "installed: $(BINDIR)/dura -> $(CURDIR)/dura.py"
+	@case ":$$PATH:" in \
+		*":$(BINDIR):"*) ;; \
+		*) echo "note: $(BINDIR) is not on your PATH" ;; \
+	esac
+
+uninstall:
+	rm -f $(BINDIR)/dura
