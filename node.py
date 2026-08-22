@@ -35,6 +35,30 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 IDENTITY_PATH = os.path.expanduser('~/.dura_identity.key')
+IDENTITY_ARMOR_HEADER = '-----BEGIN DURA IDENTITY KEY-----'
+IDENTITY_ARMOR_FOOTER = '-----END DURA IDENTITY KEY-----'
+
+
+def _armor_identity(raw_bytes):
+    """Base64 text with a header/footer — NOT real OpenPGP armor (no
+    CRC24, no packet framing), and not encryption: this only changes how
+    the same private key bytes are encoded on disk, from opaque binary
+    (`file` calls it "data") to something readable/diffable/copy-
+    pasteable. A dura-specific label on purpose, not a PGP one — this
+    repo already decided against adopting the real OpenPGP format (see
+    README's "Transitive trust" section), so nothing here should look
+    like it's actually PGP-compatible."""
+    b64 = base64.b64encode(raw_bytes).decode()
+    lines = [b64[i:i + 64] for i in range(0, len(b64), 64)]
+    return IDENTITY_ARMOR_HEADER + '\n' + '\n'.join(lines) + '\n' + IDENTITY_ARMOR_FOOTER + '\n'
+
+
+def _dearmor_identity(text):
+    lines = text.strip().splitlines()
+    if len(lines) < 2 or lines[0].strip() != IDENTITY_ARMOR_HEADER \
+            or lines[-1].strip() != IDENTITY_ARMOR_FOOTER:
+        raise ValueError('not a dura-armored identity key')
+    return base64.b64decode(''.join(lines[1:-1]))
 
 
 def load_or_create_identity():
@@ -44,15 +68,26 @@ def load_or_create_identity():
     identity = Identity('local')
     if os.path.exists(IDENTITY_PATH):
         with open(IDENTITY_PATH, 'rb') as f:
-            key_bytes = f.read()
+            file_bytes = f.read()
+        try:
+            key_bytes = _dearmor_identity(file_bytes.decode())
+        except (UnicodeDecodeError, ValueError):
+            # pre-armor identity file (raw 32 bytes, no wrapper) — same key,
+            # just not encoded yet. Re-armor it in place so this only ever
+            # has to happen once; the underlying private key bytes (and
+            # therefore the pubkey) are untouched.
+            key_bytes = file_bytes
+            with open(IDENTITY_PATH, 'w') as f:
+                f.write(_armor_identity(key_bytes))
+            os.chmod(IDENTITY_PATH, 0o600)
         identity._priv = Ed25519PrivateKey.from_private_bytes(key_bytes)
         identity.pub = identity._priv.public_key()
     else:
         key_bytes = identity._priv.private_bytes(
             serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
             serialization.NoEncryption())
-        with open(IDENTITY_PATH, 'wb') as f:
-            f.write(key_bytes)
+        with open(IDENTITY_PATH, 'w') as f:
+            f.write(_armor_identity(key_bytes))
         os.chmod(IDENTITY_PATH, 0o600)
     return identity
 
