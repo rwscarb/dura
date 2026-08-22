@@ -297,6 +297,8 @@ python3 poc_discovery.py
 
 ## Running it
 
+`make help` lists every target (or run any command below directly):
+
 ```bash
 python3 poc_challenge_auction.py          # in-process, Parts 1 + 2, narrated
 python3 poc_network_challenge.py          # real sockets, single-shot rounds, loopback
