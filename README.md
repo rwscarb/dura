@@ -297,7 +297,11 @@ python3 poc_discovery.py
 
 ## Running it
 
-`make help` lists every target (or run any command below directly):
+`./dura.py --help` (or `dura.py lightning --help` for the nested ones) is
+the friendliest entry point — it's a thin argparse wrapper over the
+Makefile, same targets, real subcommands and `--help` text instead of
+needing to remember `make` target names. `make help` lists the same
+targets directly. Or run any command below on its own:
 
 ```bash
 python3 poc_challenge_auction.py          # in-process, Parts 1 + 2, narrated
