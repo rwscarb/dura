@@ -51,17 +51,19 @@ class DuraShell(cmd.Cmd):
         print(f'  {self.identity.pubkey_hex()}')
 
     def do_host(self, arg):
-        """host <archive_dir> [--file NAME] [--port N] [--relay URL] [--advertise-host HOST]
+        """host <archive_dir> [--file NAME] [--port N] [--relay URL] [--no-announce] [--advertise-host HOST]
         — serve a real archived file in a background thread (shell stays usable),
-        announcing it on --relay if given."""
+        announcing it on --relay (default: your session's default relay — see `relay`)
+        unless --no-announce is given."""
         parts = shlex.split(arg)
         if not parts:
-            print('  usage: host <archive_dir> [--file NAME] [--port N] [--relay URL] [--advertise-host HOST]')
+            print('  usage: host <archive_dir> [--file NAME] [--port N] [--relay URL] [--no-announce] [--advertise-host HOST]')
             return
         archive_dir = parts[0]
         file_name = None
         port = 9201
-        relay = None
+        relay = self.default_relay
+        no_announce = '--no-announce' in parts
         advertise_host = '127.0.0.1'
         i = 1
         while i < len(parts):
@@ -76,10 +78,12 @@ class DuraShell(cmd.Cmd):
             i += 1
 
         entry = node.find_manifest_entry(archive_dir, file_name)
-        if relay:
+        if relay and not no_announce:
             result = node.publish(self.identity, relay, entry['sha256'], entry['name'],
                                    f'{advertise_host}:{port}')
             print(f'  announced on {relay}: {result}')
+        elif not relay:
+            print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
         t = threading.Thread(target=node.run_host_server, args=(archive_dir, file_name, port), daemon=True)
         t.start()
         self._host_threads.append(t)
