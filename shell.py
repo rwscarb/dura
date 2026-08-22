@@ -110,7 +110,8 @@ class DuraShell(cmd.Cmd):
             print(f'  announced on {relay}: {result}')
         elif not relay:
             print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
-        t = threading.Thread(target=node.run_host_server, args=(archive_dir, file_name, port), daemon=True)
+        t = threading.Thread(target=node.run_host_server,
+                              args=(archive_dir, file_name, port), kwargs={'quiet': True}, daemon=True)
         t.start()
         self._host_threads.append(t)
         print(f'  hosting {entry["name"]} on port {port} in the background — shell still usable')
@@ -120,7 +121,8 @@ class DuraShell(cmd.Cmd):
         so you don't need a separate terminal for one. Sets it as the default relay for
         discover/download/like/subscribe in this session."""
         port = int(arg.strip()) if arg.strip() else 9101
-        t = threading.Thread(target=discovery_relay.run_relay_server, args=(port,), daemon=True)
+        t = threading.Thread(target=discovery_relay.run_relay_server,
+                              args=(port,), kwargs={'quiet': True}, daemon=True)
         t.start()
         self._host_threads.append(t)
         self.default_relay = f'http://127.0.0.1:{port}'

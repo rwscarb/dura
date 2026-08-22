@@ -88,7 +88,7 @@ def load_leaves(archive_dir, root_hash):
         return json.load(f)
 
 
-def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0'):
+def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False):
     archive_dir = os.path.expanduser(archive_dir)
     entry = find_manifest_entry(archive_dir, file_name)
     leaves = load_leaves(archive_dir, entry['sha256'])
@@ -100,9 +100,13 @@ def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0'):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((bind_host, port))
     srv.listen(8)
-    print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
-          f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
-    print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
+    if not quiet:
+        # a background thread's print() races with cmd.Cmd's input()-driven
+        # prompt on the same stdout — see run_relay_server's docstring for
+        # why the shell passes quiet=True instead of patching this visually
+        print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
+              f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
+        print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
 
     while True:
         conn, _ = srv.accept()

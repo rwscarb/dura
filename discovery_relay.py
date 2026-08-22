@@ -70,11 +70,18 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(out).encode())
 
 
-def run_relay_server(port):
+def run_relay_server(port, quiet=False):
     """Split out from main() so shell.py can run a relay in a background
-    thread — same pattern as node.run_host_server."""
+    thread — same pattern as node.run_host_server. quiet=True for the shell:
+    a background thread's print() races with cmd.Cmd's input()-driven
+    prompt on the same stdout with no coordination between them — readline
+    doesn't know to redraw the prompt when unrelated output shows up mid-
+    read, so the two interleave and the prompt looks like it "disappeared."
+    The shell already prints its own equivalent confirmation line, so this
+    fixes it at the source instead of patching the visual symptom."""
     srv = ThreadingHTTPServer(('0.0.0.0', port), RelayHandler)
-    print(f"[relay:{port}] up, no opinion on content, just store-and-forward", flush=True)
+    if not quiet:
+        print(f"[relay:{port}] up, no opinion on content, just store-and-forward", flush=True)
     srv.serve_forever()
 
 
