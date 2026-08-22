@@ -140,12 +140,14 @@ async function refreshHosts() {
   tbody.innerHTML = '';
   for (const h of hosts || []) {
     const tr = document.createElement('tr');
+    const statusText = h.status === 'error' ? 'error: ' + h.error : h.status;
+    const statusClass = h.status === 'error' ? 'status-error' : (h.status === 'running' ? 'status-done' : 'status-running');
     tr.innerHTML =
       '<td>' + (h.name || '(starting…)') + '</td>' +
       '<td>' + h.port + '</td>' +
       '<td>' + (h.price ? h.price + ' sat' : 'free') + '</td>' +
       '<td>' + (h.tunnel || '—') + '</td>' +
-      '<td>' + h.status + '</td>';
+      '<td class="' + statusClass + '">' + statusText + '</td>';
     tbody.appendChild(tr);
   }
 }

@@ -129,6 +129,10 @@ def cmd_host(args):
     import node
     identity = node.load_or_create_identity()
     entry = node.find_manifest_entry(args.archive_dir, args.file)
+    # fail fast, before announcing anything — a manifest entry with no
+    # matching chunk data would otherwise get announced to the relay and
+    # only fail later, in the background server thread
+    leaves = node.load_leaves(args.archive_dir, entry['sha256'])
     for relay_url in args.relay:
         host_addr = f'{args.advertise_host}:{args.port}'
         result = node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr,
@@ -136,7 +140,6 @@ def cmd_host(args):
         print(f"announced on {relay_url}: {result}")
     if args.tunnel:
         relay_host, relay_port = args.tunnel.rsplit(':', 1)
-        leaves = node.load_leaves(args.archive_dir, entry['sha256'])
         archive_dir = os.path.expanduser(args.archive_dir)
         file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
         threading.Thread(target=node.run_host_tunnel,

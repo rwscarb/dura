@@ -116,6 +116,11 @@ class DuraShell(cmd.Cmd):
             i += 1
 
         entry = node.find_manifest_entry(archive_dir, file_name)
+        # fail fast, before announcing anything — a manifest entry with no
+        # matching chunk data would otherwise get announced to the relay
+        # and only fail later, in the background server thread (onecmd's
+        # exception net doesn't reach into background threads)
+        leaves = node.load_leaves(archive_dir, entry['sha256'])
         if relay and not no_announce:
             result = node.publish(self.identity, relay, entry['sha256'], entry['name'],
                                    f'{advertise_host}:{port}', tunnel=tunnel)
@@ -124,7 +129,6 @@ class DuraShell(cmd.Cmd):
             print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
         if tunnel:
             relay_host, relay_port = tunnel.rsplit(':', 1)
-            leaves = node.load_leaves(archive_dir, entry['sha256'])
             expanded_dir = os.path.expanduser(archive_dir)
             file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
             tt = threading.Thread(target=node.run_host_tunnel,

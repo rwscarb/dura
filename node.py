@@ -146,6 +146,10 @@ def find_manifest_entry(archive_dir, file_name=None):
 def load_leaves(archive_dir, root_hash):
     archive_dir = os.path.expanduser(archive_dir)
     chunks_path = os.path.join(archive_dir, '.ott', 'chunks', f'{root_hash}.json')
+    if not os.path.exists(chunks_path):
+        sys.exit(f"no chunks file at {chunks_path} — the manifest entry for this hash has no "
+                 f"matching chunk data in this archive_dir (stale/mismatched .ott/ state, or "
+                 f"this isn't the archive_dir that file was actually added from)")
     with open(chunks_path) as f:
         return json.load(f)
 

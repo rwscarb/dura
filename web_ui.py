@@ -44,26 +44,37 @@ def _as_list(value, default):
 
 
 def _run_host_job(host_id, archive_dir, file_name, port, price, relay_urls, advertise_host, tunnel):
-    identity = _identity()
-    entry = node.find_manifest_entry(archive_dir, file_name)
-    announced = []
-    for relay_url in relay_urls:
-        host_addr = f'{advertise_host}:{port}'
-        node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr, tunnel=tunnel)
-        announced.append(relay_url)
-    with _lock:
-        _hosts[host_id].update(name=entry['name'], content_hash=entry['sha256'],
-                                announced_on=announced, status='running')
-    if tunnel:
-        relay_host, relay_port = tunnel.rsplit(':', 1)
+    try:
+        identity = _identity()
+        entry = node.find_manifest_entry(archive_dir, file_name)
+        # fail fast, before announcing anything — a manifest entry with no
+        # matching chunk data would otherwise get announced to the relay
+        # and only fail later, deep in a background thread with no way
+        # for the UI to ever find out
         leaves = node.load_leaves(archive_dir, entry['sha256'])
-        expanded_dir = os.path.expanduser(archive_dir)
-        file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
-        threading.Thread(target=node.run_host_tunnel,
-                          args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
-                                file_path, price),
-                          kwargs={'quiet': True}, daemon=True).start()
-    node.run_host_server(archive_dir, file_name, port, quiet=True, price=price)
+        announced = []
+        for relay_url in relay_urls:
+            host_addr = f'{advertise_host}:{port}'
+            node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr, tunnel=tunnel)
+            announced.append(relay_url)
+        with _lock:
+            _hosts[host_id].update(name=entry['name'], content_hash=entry['sha256'],
+                                    announced_on=announced, status='running')
+        if tunnel:
+            relay_host, relay_port = tunnel.rsplit(':', 1)
+            expanded_dir = os.path.expanduser(archive_dir)
+            file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
+            threading.Thread(target=node.run_host_tunnel,
+                              args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
+                                    file_path, price),
+                              kwargs={'quiet': True}, daemon=True).start()
+        node.run_host_server(archive_dir, file_name, port, quiet=True, price=price)
+    except SystemExit as e:
+        with _lock:
+            _hosts[host_id].update(status='error', error=str(e))
+    except Exception as e:
+        with _lock:
+            _hosts[host_id].update(status='error', error=f'{type(e).__name__}: {e}')
 
 
 def _run_download_job(job_id, content_hash, relay_urls, out_path, k, use_lightning):
