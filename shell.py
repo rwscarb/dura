@@ -44,6 +44,32 @@ class DuraShell(cmd.Cmd):
     def emptyline(self):
         pass  # don't repeat the last command on a bare Enter, like ott
 
+    def onecmd(self, line):
+        """ott's do_* methods each catch their own expected errors (OttError,
+        OttNotFoundError) locally rather than needing a shell-wide net —
+        that works there because ott's operations are all local/filesystem.
+        dura's commands do real network I/O, depend on packages that might
+        not be installed, and several node.py functions call sys.exit() on
+        expected failures (missing archive, hash mismatch, unreachable
+        host) — correct for the one-shot CLI, where sys.exit() ending the
+        process IS the right behavior, but fatal here: the shell's own
+        `quit`/`q`/Ctrl-D exit via a do_* method returning True, never via
+        SystemExit, so there's no legitimate case where letting SystemExit
+        (or anything else) propagate out of a command is correct — it would
+        just kill the session, including any background host/relay threads
+        still running. Catch broadly, print, stay alive."""
+        try:
+            return super().onecmd(line)
+        except ModuleNotFoundError as e:
+            # e.name is the *module* name (e.g. 'ott'), not necessarily the pip package
+            # name (btcvm) — don't suggest `pip install {e.name}`, it's wrong here and
+            # would be wrong again for any other module/package name mismatch.
+            print(f'  ✗ {e} — pip install -r requirements.txt')
+        except SystemExit as e:
+            print(f'  ✗ {e}')
+        except Exception as e:
+            print(f'  ✗ {type(e).__name__}: {e}')
+
     # ── commands ─────────────────────────────────────────────────────────
 
     def do_whoami(self, arg):
