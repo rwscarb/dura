@@ -488,6 +488,113 @@ Separately verified the decay math itself against a real 3-hop chain
 stranger absent from the graph entirely, `max_hops` correctly bounding how
 far it searches — exact, not approximate.
 
+### `tunnel_relay.py` + persistent sessions in `node.py` — NAT traversal
+
+`host --advertise-host`'s own help text used to say it outright: "no NAT
+traversal here." Real gap — almost nobody has a directly reachable
+inbound port. Fixed with a relay-mediated tunnel rather than real
+STUN/ICE hole-punching: works behind *any* NAT including CGNAT (both
+sides only ever make outbound connections, so there's nothing for a
+firewall to block), at the honest cost of relay bandwidth/latency and
+someone having to run `tunnel_relay.py` somewhere reachable — same
+operational shape as already running a discovery relay, not a new kind of
+problem.
+
+Rendezvous protocol (hand-rolled to match this repo's own line-based wire
+protocol rather than pulling in an external tunnel tool like `bore`):
+a NAT'd host opens one persistent outbound `REGISTER <token>` control
+connection; a downloader connects and sends `CONNECT <token>`; the relay
+asks the host to dial back (`NEWSTREAM <stream_id>` on the control
+channel, `DATA <stream_id>` as the reply) and, once paired, does nothing
+but shovel raw bytes between the two sockets — same "dumb relay, no
+opinion on the payload" design `discovery_relay.py` already uses, just
+for bytes instead of signed JSON events. `token` is the archive's
+`content_hash`; the relay has no idea what it means, same as everywhere
+else in this repo that keys off it.
+
+Had to fix a real prerequisite bug first, not just add the relay: every
+wire-protocol command (`INFO`, `LEAVES`, one `FETCH` per chunk — 3324 of
+them for the real archive) used to open a brand-new TCP connection.
+Cheap directly, fatal through a relay — every single chunk would pay a
+full rendezvous round-trip before any bytes moved. Fixed by giving both
+sides a persistent session (`HostConnection` client-side, `serve_session`
+host-side, looping over many commands per connection instead of one) —
+a net win for direct connections too, not just a tunnel workaround.
+
+Second real bug, caught while verifying this against real sockets, not
+just in review: Python's `socketserver.ThreadingMixIn` closes a
+connection's socket the instant its handler function *returns* — a
+handler that spawns a pipe thread and returns immediately gets its own
+socket killed out from under that thread mid-transfer. Fixed by having
+each handler thread block for the tunneled session's full lifetime
+(`_Pairing`'s `ready`/`done` events in `tunnel_relay.py`) instead of
+firing off detached threads and returning early. First attempt failed
+with `json.decoder.JSONDecodeError: Expecting value` — an empty response,
+not a corrupted one, which is exactly what a socket closed mid-read looks
+like.
+
+Real end-to-end proof: hosted the real 217MB/3324-chunk archive,
+advertised at a deliberately unreachable address (`10.255.255.1`, not
+localhost) so there was no possibility of a direct connection carrying
+the download, `--tunnel 127.0.0.1:9199`. Downloaded entirely through the
+tunnel, `cmp`-verified byte-identical against the source, 3324 chunks in
+1.4s — comparable to a direct download, not a meaningfully slower path.
+
+```bash
+# terminal 1
+python3 discovery_relay.py 9101
+# terminal 2
+python3 tunnel_relay.py 9199
+# terminal 3 — no reachable --advertise-host at all
+python3 dura.py host real_archive --port 9201 --tunnel 127.0.0.1:9199 \
+    --relay http://127.0.0.1:9101 --advertise-host 10.255.255.1
+# terminal 4
+python3 dura.py download <content_hash> --relay http://127.0.0.1:9101 --out downloaded.mp4
+```
+
+Additive, backward-compatible protocol change, same shape as the
+optional `PRICE` wire verb: `publish()` gained an optional `tunnel`
+field (`'relay_host:relay_port'` or absent); a candidate without it is
+just connected to directly, exactly as before this existed.
+
+### `web_ui.py` — local web UI
+
+Hosting/discovering/downloading/liking/subscribing all required
+memorizing `dura.py`'s CLI flags — real friction for anyone who isn't
+already comfortable with argparse. `web_ui.py` is a small stdlib
+`http.server`/`ThreadingHTTPServer` JSON API — same tool
+`discovery_relay.py` already uses, no new dependency, still just the
+three packages in `requirements.txt` — wrapping the exact same
+`node.py` functions the CLI calls, no reimplemented protocol logic. The
+frontend (`web/`) is a single static page, vanilla JS, no build step —
+matches the rest of this repo's no-toolchain style.
+
+Binds `127.0.0.1` by default on purpose: a local control surface, not
+something meant to face the internet, and there's no auth built — same
+"reachability is on you" honesty `--advertise-host`'s docs already apply
+elsewhere. `--bind` widens it at your own risk.
+
+Endpoints, all thin wrappers: `GET /api/whoami`, `GET /api/discover`,
+`POST /api/host` (backgrounds `run_host_server`/`run_host_tunnel` the
+same way `shell.py`'s `do_host` already does) + `GET /api/hosts`,
+`POST /api/download` + `GET /api/download/<job_id>` for polling progress
+(`download()` gained an optional `on_progress(idx, n_chunks)` callback,
+default no-op, so CLI output is unaffected), `POST /api/like`,
+`POST /api/subscribe`, `GET /api/reputation/<pubkey>`.
+
+Real end-to-end proof, not just the API responding: hosted a file
+through the **Host** form, confirmed a second terminal's `dura discover`
+actually saw it (proves the API called the real `node.publish`, not a
+mock); downloaded through the **Downloads** form with a live-polling
+progress bar, `cmp`-verified byte-identical; liked and subscribed
+through the UI, confirmed the real signed events landed on the relay by
+querying it directly.
+
+```bash
+python3 dura.py web --port 8080
+# open http://127.0.0.1:8080/
+```
+
 ### `shell.py` — interactive, tab-completing, same pattern as `ott`'s shell
 
 `python3 dura.py` with no arguments (or `dura.py shell`) drops into an
@@ -503,7 +610,8 @@ running it that way for real (`host` with no relay running produces
 relay that isn't there — real friction that surfaced from actually using
 it, not a hypothetical). `relay` also sets itself as the session's default
 relay, so `discover`/`download`/`like`/`subscribe` don't need `--relay`
-repeated every time.
+repeated every time. `host` also takes `--tunnel RELAY_HOST:PORT` now,
+same as the CLI — see `tunnel_relay.py` above.
 
 Completion resolves against real state, not a fixed list — same idea as
 `ott`'s completions (which complete against the real archive). `download`
@@ -550,6 +658,8 @@ cd lightning && docker compose up -d && cd ..   # real bitcoind + 2 LND nodes (s
 python3 poc_challenge_auction.py --lightning    # same auction, real HTLC settlement
 python3 poc_real_archive_challenge.py           # same challenge mechanism, real 3324-chunk video
 python3 poc_discovery.py                        # 3 real relays, personalized ranking, sybil test
+python3 tunnel_relay.py 9199                    # NAT-traversal relay — see host --tunnel below
+python3 dura.py web --port 8080                 # local web UI at http://127.0.0.1:8080/
 ```
 
 `pip install -r requirements.txt` gets everything (`btcvm`, `cryptography`,
@@ -584,6 +694,15 @@ for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
    client's own subscribe graph, sybil-resistant (20 fake identities move
    neither client's score), real relay-death test (content survives,
    anything posted only to the dead relay doesn't — redundancy isn't free).
+9. ~~NAT traversal~~ — done, `tunnel_relay.py`: relay-mediated rendezvous
+   (not real STUN/ICE hole-punching), real 217MB/3324-chunk archive
+   downloaded end-to-end through the tunnel with the host advertised at
+   an unreachable address, byte-identical. Required a persistent-session
+   refactor of `node.py`'s wire protocol first — see above.
+10. ~~Local UI~~ — done, `web_ui.py` + `web/`: stdlib JSON API wrapping
+    the same `node.py` functions the CLI calls, static vanilla-JS
+    frontend, no new dependency. Host/discover/download/like/subscribe
+    all verified working from the browser, not just the API responding.
 
 Every item on the original roadmap is now built and verified against real
 output, not just designed — and `node.py` (below) wires host/discover/
@@ -592,5 +711,8 @@ demos. What's left is scaling and hardening this, not proving the
 mechanisms work — see each section above for the honest edges (loopback
 timing separation isn't airtight without averaging, relay death loses
 non-redundant data, RunPod flakiness, regtest-only Lightning, still no
-real P2P/DHT discovery or NAT traversal, no UI) that are still real
-constraints even though the core ideas held up.
+real P2P/DHT discovery — you still have to know a relay URL out of
+band — the tunnel relay is a single point of failure/bandwidth cost with
+no redundancy story the way discovery relays have, and the web UI has no
+auth, local-only by design) that are still real constraints even though
+the core ideas held up.
