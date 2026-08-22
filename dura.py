@@ -52,7 +52,9 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog='dura',
         description='Censorship-resistant video PoC — real mechanisms behind the #all-pdx brainstorm.')
-    sub = parser.add_subparsers(dest='command', required=True)
+    sub = parser.add_subparsers(dest='command', required=False)
+
+    sub.add_parser('shell', help='interactive shell with tab completion (also the default with no command)')
 
     for name, (_target, help_text) in COMMANDS.items():
         sub.add_parser(name, help=help_text)
@@ -163,6 +165,13 @@ NATIVE_COMMANDS = {
 
 def main():
     args = build_parser().parse_args()
+    if args.command is None or args.command == 'shell':
+        import shell
+        try:
+            shell.DuraShell().cmdloop()
+        except KeyboardInterrupt:
+            print()
+        return
     if args.command in NATIVE_COMMANDS:
         NATIVE_COMMANDS[args.command](args)
         return

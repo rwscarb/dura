@@ -355,6 +355,37 @@ reachability is on you. Same point-to-point-known-address limitation
 named earlier in this README, now visible as an actual CLI flag instead of
 just a caveat in prose.
 
+### `shell.py` — interactive, tab-completing, same pattern as `ott`'s shell
+
+`python3 dura.py` with no arguments (or `dura.py shell`) drops into an
+interactive shell — same `cmd.Cmd` + readline pattern as `ott`'s own shell,
+same conventions: short aliases (`w`/`h`/`disc`/`dl`/`l`/`sub`), `help` or
+`?` for commands, `Ctrl-D` or `q` to exit, tab completes.
+
+Completion resolves against real state, not a fixed list — same idea as
+`ott`'s completions (which complete against the real archive). `download`
+and `like` tab-complete against content hashes actually seen in the last
+`discover`; `subscribe` completes against pubkeys actually seen:
+
+```
+dura> host real_archive --port 9202 --relay http://127.0.0.1:9101
+  hosting real_video.mp4 on port 9202 in the background — shell still usable
+dura> discover http://127.0.0.1:9101
+  'real_video.mp4'   hash=7f2477c7ea675004...  host=127.0.0.1:9202  by=10cbc58de88f...
+dura> download 7f24<TAB>
+7f2477c7ea675004ad5dbab6dc7c44327c724b880cc389807df1965b77966acc
+dura> download 7f2477c7ea675004ad5dbab6dc7c44327c724b880cc389807df1965b77966acc
+3324 chunks downloaded and verified in 1.4s
+```
+
+`host` runs the server in a background thread instead of blocking the
+shell — genuinely new, not copied from `ott`, since nothing in `ott`
+blocks forever the way a hosting server does. Ran this exact sequence for
+real (scripted, not just described): host → discover → download →
+`cmp`-verified byte-identical → `like`, all in one shell session, download
+still finishing in 1.4s with the server running in the background thread
+the whole time.
+
 ## Running it
 
 `./dura.py --help` (or `dura.py lightning --help` for the nested ones) is
