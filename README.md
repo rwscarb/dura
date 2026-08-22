@@ -78,13 +78,27 @@ recorded round was slower than the relay's best. Averaging repeated
 challenges does separate them (typically somewhere in the k=3–20 range across
 several runs — see below); trust a session average, not any one round.
 
-Separately: RunPod (meant to be the real-WAN test target) was down when this
-was run, so real WAN latency was measured against public hosts instead
-(1.1.1.1, 8.8.8.8, api.github.com: 5–30ms real TCP-connect RTT). Even the
-fastest of those numbers dwarfs the loopback holder's worst case — meaning
-real geographic distance make single-shot separation *easy*; the hard case
-this PoC actually stress-tests is two peers that are genuinely close
-together, which is exactly when a nearby relay is hardest to catch on timing
+RunPod was down the first time this was tried, so real WAN latency got
+measured against public hosts as a substitute (1.1.1.1, 8.8.8.8,
+api.github.com: 5-30ms real TCP-connect RTT) — suggestive, not conclusive.
+**Update: ran it for real once a RunPod box came back up**, tunneled over a
+real SSH connection (`ssh -L`, since the pod only exposes its SSH port, not
+arbitrary TCP) — local honest holder vs. a local relay that secretly fetches
+from that real remote box for every challenge:
+
+```
+holder: mean 0.254ms  min 0.186ms  max 1.250ms
+relay:  mean 432.648ms  min 395.583ms  max 638.218ms
+
+session size k   worst honest mean   best cheater mean  separated?
+             1             1.250ms           395.583ms  YES
+```
+
+~1700x gap, separates cleanly at k=1 — single-shot is all you need once real
+geographic distance is involved. Confirms the substitute-host hypothesis:
+real WAN distance makes this *easy*; the hard case this PoC actually
+stress-tests is two peers that are genuinely close together, which is
+exactly when a nearby relay is hardest to catch on timing
 alone.
 
 ![session-size separation chart](poc_challenge_separation.png)
@@ -178,10 +192,8 @@ pure stdlib. Docker/Compose needed only for the container-network test.
 1. ~~Nonce-salted challenge + timing bound~~ — done, `poc_challenge_auction.py` Part 2
 2. ~~Real network round-trip instead of in-process~~ — done, `poc_network_challenge.py`
 3. ~~Local reputation + signed portable attestations~~ — done, `poc_reputation.py`
-4. **Real WAN calibration against an actual second machine.** The public-host
-   substitute measurement is suggestive, not conclusive — needs the actual
-   protocol run against a real remote holder once RunPod (or any reachable
-   second box) is up.
+4. ~~Real WAN calibration against an actual second machine~~ — done, real
+   RunPod box over an SSH tunnel: ~1700x gap, separates at k=1
 5. **Real testnet Lightning HTLC settlement**, replacing the mock
    "settlement" print statement in the auction.
 6. **Point the mechanism at a real `.ott` archive** instead of `os.urandom`
