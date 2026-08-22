@@ -25,6 +25,7 @@ import os
 import random
 import socket
 import sys
+import threading
 import time
 import urllib.request
 
@@ -68,6 +69,31 @@ def recv_line(sock):
     return buf.decode().strip()
 
 
+class LineReader:
+    """Buffered line reader for a connection that can receive more than
+    one newline-terminated message per recv() — recv_line above assumes
+    exactly one line arrives per call, true everywhere else in this
+    protocol (strict request/response, never pipelined) but not true for
+    the tunnel control channel: if two downloaders CONNECT to
+    tunnel_relay.py around the same time, both NEWSTREAM messages can
+    legitimately land in a single recv(), and recv_line would silently
+    fold both into one malformed line and drop the second one."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b''
+
+    def readline(self):
+        while b'\n' not in self.buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                line, self.buf = self.buf, b''
+                return line.decode().strip()
+            self.buf += chunk
+        line, self.buf = self.buf.split(b'\n', 1)
+        return line.decode().strip()
+
+
 def find_manifest_entry(archive_dir, file_name=None):
     archive_dir = os.path.expanduser(archive_dir)  # os.path.join never expands ~, it stays literal
     manifest_path = os.path.join(archive_dir, '.ott', 'manifest.jsonl')
@@ -89,30 +115,18 @@ def load_leaves(archive_dir, root_hash):
         return json.load(f)
 
 
-def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False, price=0):
-    archive_dir = os.path.expanduser(archive_dir)
-    entry = find_manifest_entry(archive_dir, file_name)
-    leaves = load_leaves(archive_dir, entry['sha256'])
-    file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
-    if not os.path.exists(file_path):
-        sys.exit(f"archived file not found on disk at {file_path}")
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((bind_host, port))
-    srv.listen(8)
-    if not quiet:
-        # a background thread's print() races with cmd.Cmd's input()-driven
-        # prompt on the same stdout — see run_relay_server's docstring for
-        # why the shell passes quiet=True instead of patching this visually
-        print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
-              f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
-        print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
-
-    while True:
-        conn, _ = srv.accept()
-        with conn:
+def serve_session(conn, entry, leaves, file_path, price):
+    """Handle every command on one connection, not just one — a download
+    needs INFO + LEAVES + one FETCH per chunk (thousands, for a real
+    archive), and reconnecting per command is what makes a tunneled
+    connection (see tunnel_relay.py) pay a full relay rendezvous per
+    chunk instead of once per session. Shared by the direct accept() loop
+    below and by run_host_tunnel's per-stream data connections."""
+    with conn:
+        while True:
             line = recv_line(conn)
+            if not line:
+                break
             parts = line.split()
             if not parts:
                 continue
@@ -140,54 +154,173 @@ def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=Fal
                 conn.sendall(f'PRICE {price}\n'.encode())
 
 
+def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False, price=0):
+    archive_dir = os.path.expanduser(archive_dir)
+    entry = find_manifest_entry(archive_dir, file_name)
+    leaves = load_leaves(archive_dir, entry['sha256'])
+    file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
+    if not os.path.exists(file_path):
+        sys.exit(f"archived file not found on disk at {file_path}")
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((bind_host, port))
+    srv.listen(8)
+    if not quiet:
+        # a background thread's print() races with cmd.Cmd's input()-driven
+        # prompt on the same stdout — see run_relay_server's docstring for
+        # why the shell passes quiet=True instead of patching this visually
+        print(f"[host:{port}] serving {entry['name']} ({entry['size']:,} bytes, "
+              f"{entry['n_chunks']} chunks x {entry['chunk_size']} bytes)")
+        print(f"[host:{port}] sha256/merkle root: {entry['sha256']}")
+
+    while True:
+        conn, _ = srv.accept()
+        # a whole download now lives on one connection (see serve_session) —
+        # accept() must hand off to a thread per connection, or one session
+        # would block every other downloader until it finished
+        threading.Thread(target=serve_session, args=(conn, entry, leaves, file_path, price),
+                          daemon=True).start()
+
+
+def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, price, quiet=False):
+    """NAT-traversal path: instead of (or alongside) binding a locally
+    reachable port, register with a tunnel_relay.py relay and serve every
+    downloader it pairs us with. One persistent CONTROL connection stays
+    open for the lifetime of hosting; each real downloader gets its own
+    DATA connection, dialed back to the relay on demand (NEWSTREAM), so
+    concurrent tunneled downloads don't block each other."""
+    ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ctrl.connect((relay_host, relay_port))
+    ctrl.sendall(f'REGISTER {token}\n'.encode())
+    if not quiet:
+        print(f"[tunnel] registered {token[:16]}... with relay {relay_host}:{relay_port}")
+
+    reader = LineReader(ctrl)
+    while True:
+        line = reader.readline()
+        if not line:
+            if not quiet:
+                print(f"[tunnel] control connection to {relay_host}:{relay_port} closed")
+            return
+        parts = line.split()
+        if parts and parts[0] == 'NEWSTREAM':
+            stream_id = parts[1]
+            data_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            data_conn.connect((relay_host, relay_port))
+            data_conn.sendall(f'DATA {stream_id}\n'.encode())
+            threading.Thread(target=serve_session,
+                              args=(data_conn, entry, leaves, file_path, price),
+                              daemon=True).start()
+
+
 # ── client side ──────────────────────────────────────────────────────────
 
-def _request(host, port, line, timeout=10):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(timeout)
-        s.connect((host, port))
-        s.sendall((line + '\n').encode())
-        return recv_line(s)
+class HostConnection:
+    """One persistent socket carrying every command for a session, direct
+    or tunneled — see serve_session's docstring for why reconnecting per
+    command (the old behavior) is untenable once a tunnel relay is in the
+    path."""
+
+    def __init__(self, sock):
+        self.sock = sock
+
+    @classmethod
+    def connect_direct(cls, host, port, timeout=10):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        return cls(sock)
+
+    @classmethod
+    def connect_via_tunnel(cls, relay_host, relay_port, token, timeout=10):
+        """token is the content_hash the host registered under (see
+        run_host_tunnel) — the tunnel relay has zero opinion on content,
+        it just pairs this CONNECT with that host's next NEWSTREAM."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((relay_host, relay_port))
+        sock.sendall(f'CONNECT {token}\n'.encode())
+        return cls(sock)
+
+    def request(self, line):
+        self.sock.sendall((line + '\n').encode())
+        return recv_line(self.sock)
+
+    def close(self):
+        self.sock.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
 
 
-def download(host, port, out_path):
+def _parse_tunnel(tunnel_addr):
+    """'relay_host:relay_port' -> (relay_host, relay_port), or None."""
+    if not tunnel_addr:
+        return None
+    relay_host, relay_port = tunnel_addr.rsplit(':', 1)
+    return relay_host, int(relay_port)
+
+
+def open_connection(host_addr, tunnel=None, content_hash=None, timeout=10):
+    """host_addr is 'host:port' — used directly unless tunnel is given, in
+    which case it's ignored and content_hash is used as the tunnel
+    rendezvous token instead (the host isn't reachable at host_addr at
+    all in that case)."""
+    if tunnel:
+        if not content_hash:
+            raise ValueError("tunnel connection requires content_hash as the rendezvous token")
+        relay_host, relay_port = tunnel
+        return HostConnection.connect_via_tunnel(relay_host, relay_port, content_hash, timeout=timeout)
+    host, port_s = host_addr.rsplit(':', 1)
+    return HostConnection.connect_direct(host, int(port_s), timeout=timeout)
+
+
+def download(host_addr, out_path, tunnel=None, content_hash=None, on_progress=None):
     from ott import merkle_root  # pip install btcvm
 
     out_path = os.path.expanduser(out_path)
-    info = json.loads(_request(host, port, 'INFO'))
-    print(f"downloading {info['name']} ({info['size']:,} bytes, {info['n_chunks']} chunks) "
-          f"from {host}:{port}")
-    leaves = json.loads(_request(host, port, 'LEAVES'))
-    if len(leaves) != info['n_chunks']:
-        sys.exit(f"host's LEAVES count ({len(leaves)}) doesn't match its own INFO "
-                 f"({info['n_chunks']}) — refusing to trust an inconsistent host")
+    via = f"tunnel {tunnel[0]}:{tunnel[1]}" if tunnel else host_addr
+    with open_connection(host_addr, tunnel=tunnel, content_hash=content_hash) as conn:
+        info = json.loads(conn.request('INFO'))
+        print(f"downloading {info['name']} ({info['size']:,} bytes, {info['n_chunks']} chunks) "
+              f"from {via}")
+        leaves = json.loads(conn.request('LEAVES'))
+        if len(leaves) != info['n_chunks']:
+            sys.exit(f"host's LEAVES count ({len(leaves)}) doesn't match its own INFO "
+                     f"({info['n_chunks']}) — refusing to trust an inconsistent host")
 
-    # ott records a VIDEO's sha256 field as the Merkle root over its chunk
-    # hashes, not a linear whole-file hash (see cmd_add: `digest =
-    # merkle_root(chunks)`) — verify that BEFORE downloading a single byte,
-    # so a host can't serve a self-consistent-but-fake leaves list.
-    recomputed_root = merkle_root(leaves)
-    if recomputed_root != info['sha256']:
-        sys.exit(f"host's LEAVES don't Merkle-root to its own advertised sha256 "
-                 f"({recomputed_root[:16]}... != {info['sha256'][:16]}...) — "
-                 f"refusing to download from a host lying about its own archive")
+        # ott records a VIDEO's sha256 field as the Merkle root over its chunk
+        # hashes, not a linear whole-file hash (see cmd_add: `digest =
+        # merkle_root(chunks)`) — verify that BEFORE downloading a single byte,
+        # so a host can't serve a self-consistent-but-fake leaves list.
+        recomputed_root = merkle_root(leaves)
+        if recomputed_root != info['sha256']:
+            sys.exit(f"host's LEAVES don't Merkle-root to its own advertised sha256 "
+                     f"({recomputed_root[:16]}... != {info['sha256'][:16]}...) — "
+                     f"refusing to download from a host lying about its own archive")
 
-    t0 = time.time()
-    with open(out_path, 'wb') as out:
-        for idx in range(info['n_chunks']):
-            resp = _request(host, port, f'FETCH {idx}')
-            if not resp.startswith('DATA '):
-                sys.exit(f"chunk {idx}: bad response from host: {resp[:80]}")
-            data = base64.b64decode(resp[5:])
-            leaf = hashlib.sha256(data).hexdigest()
-            if leaf != leaves[idx]:
-                sys.exit(f"chunk {idx}: hash mismatch — host sent bytes that don't match "
-                         f"its own committed chunk hash. aborting download, not writing a "
-                         f"corrupted/tampered file.")
-            out.write(data)
-            if idx % 200 == 0 or idx == info['n_chunks'] - 1:
-                print(f"  chunk {idx + 1}/{info['n_chunks']} verified", end='\r', flush=True)
-    elapsed = time.time() - t0
+        t0 = time.time()
+        with open(out_path, 'wb') as out:
+            for idx in range(info['n_chunks']):
+                resp = conn.request(f'FETCH {idx}')
+                if not resp.startswith('DATA '):
+                    sys.exit(f"chunk {idx}: bad response from host: {resp[:80]}")
+                data = base64.b64decode(resp[5:])
+                leaf = hashlib.sha256(data).hexdigest()
+                if leaf != leaves[idx]:
+                    sys.exit(f"chunk {idx}: hash mismatch — host sent bytes that don't match "
+                             f"its own committed chunk hash. aborting download, not writing a "
+                             f"corrupted/tampered file.")
+                out.write(data)
+                if on_progress:
+                    on_progress(idx, info['n_chunks'])
+                if idx % 200 == 0 or idx == info['n_chunks'] - 1:
+                    print(f"  chunk {idx + 1}/{info['n_chunks']} verified", end='\r', flush=True)
+        elapsed = time.time() - t0
     actual_size = os.path.getsize(out_path)
     print(f"\n{info['n_chunks']} chunks downloaded and verified in {elapsed:.1f}s")
     print(f"Merkle root over received chunks matches host's advertised sha256: True "
@@ -218,17 +351,18 @@ def download(host, port, out_path):
 # actually do independently, since LEAVES is already Merkle-root-checked
 # against the host's own advertised sha256.
 
-def sample_challenge(host, port, leaves, k=3, timeout=10):
-    """Fetch k random chunks and verify each against the (already Merkle-
-    verified) leaves list — proves *this specific host* truly holds real
-    chunks, not just that someone somewhere does."""
+def sample_challenge(conn, leaves, k=3):
+    """Fetch k random chunks over the given (already-open) connection and
+    verify each against the (already Merkle-verified) leaves list —
+    proves *this specific host* truly holds real chunks, not just that
+    someone somewhere does."""
     n = len(leaves)
     indices = random.sample(range(n), min(k, n))
     latencies = []
     for idx in indices:
         t0 = time.perf_counter()
         try:
-            resp = _request(host, port, f'FETCH {idx}', timeout=timeout)
+            resp = conn.request(f'FETCH {idx}')
         except OSError:
             return False, latencies
         latencies.append((time.perf_counter() - t0) * 1000)
@@ -240,9 +374,9 @@ def sample_challenge(host, port, leaves, k=3, timeout=10):
     return True, latencies
 
 
-def get_price(host, port, timeout=5):
+def get_price(conn):
     try:
-        resp = _request(host, port, 'PRICE', timeout=timeout)
+        resp = conn.request('PRICE')
     except OSError:
         return 0
     if resp.startswith('PRICE '):
@@ -308,29 +442,29 @@ def select_host(candidates, k=3, reputation=None, trust_in_signers=None):
 
     scored = []
     for c in candidates:
-        host, port_s = c['host'].rsplit(':', 1)
-        port = int(port_s)
+        tunnel = _parse_tunnel(c.get('tunnel'))
         try:
-            leaves = json.loads(_request(host, port, 'LEAVES'))
-            info = json.loads(_request(host, port, 'INFO'))
+            with open_connection(c['host'], tunnel=tunnel, content_hash=c['content_hash']) as conn:
+                leaves = json.loads(conn.request('LEAVES'))
+                info = json.loads(conn.request('INFO'))
+                if merkle_root(leaves) != info['sha256'] or info['sha256'] != c['content_hash']:
+                    print(f"  x {c['host']}: advertised content doesn't match its own LEAVES/INFO — skipping")
+                    continue
+                passed, latencies = sample_challenge(conn, leaves, k=k)
+                if not passed:
+                    print(f"  x {c['host']}: failed possession challenge ({k} chunks sampled) — skipping")
+                    continue
+                price = get_price(conn)
         except OSError as e:
             print(f"  x {c['host']}: unreachable ({e})")
             continue
-        if merkle_root(leaves) != info['sha256'] or info['sha256'] != c['content_hash']:
-            print(f"  x {c['host']}: advertised content doesn't match its own LEAVES/INFO — skipping")
-            continue
-        passed, latencies = sample_challenge(host, port, leaves, k=k)
-        if not passed:
-            print(f"  x {c['host']}: failed possession challenge ({k} chunks sampled) — skipping")
-            continue
-        price = get_price(host, port)
         rep_score, rep_why = (reputation.trust_score(c['signer_pubkey'], trust_in_signers)
                                if reputation else (0.5, 'no reputation store'))
         avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
         print(f"  + {c['host']}: possession verified ({k}/{k} chunks), price={price} sat, "
               f"reputation={rep_score:.2f} ({rep_why}), avg_latency={avg_latency:.1f}ms")
-        scored.append({'candidate': c, 'host': host, 'port': port, 'info': info,
-                        'price': price, 'reputation': rep_score, 'avg_latency_ms': avg_latency})
+        scored.append({'candidate': c, 'info': info, 'price': price,
+                        'reputation': rep_score, 'avg_latency_ms': avg_latency})
 
     if not scored:
         return None
@@ -355,7 +489,7 @@ def fetch_verified(relay_urls, event_type):
 
 
 def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_lightning=False,
-                           trust_hops=3, trust_decay=0.5):
+                           trust_hops=3, trust_decay=0.5, on_progress=None):
     """The real end-to-end path: resolve every host claiming to have this
     content, challenge-gate them, auction among survivors — weighted by
     reputation built from real transitive trust (your own subscribes, plus
@@ -408,7 +542,8 @@ def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_ligh
             print(f"  price is {winner['price']} sat but --lightning not given "
                   f"— downloading anyway, unpaid (no enforcement in this demo)")
 
-    path = download(winner['host'], winner['port'], out_path or c['title'])
+    path = download(c['host'], out_path or c['title'], tunnel=_parse_tunnel(c.get('tunnel')),
+                     content_hash=c['content_hash'], on_progress=on_progress)
 
     reputation.record_direct(c['signer_pubkey'], passes=1, fails=0,
                               avg_latency_ms=winner['avg_latency_ms'])
@@ -448,8 +583,13 @@ def fetch_events(relay_url, event_type=None):
         return None
 
 
-def publish(identity, relay_url, content_hash, title, host_addr):
-    event = identity.sign_event('publish', content_hash=content_hash, title=title, host=host_addr)
+def publish(identity, relay_url, content_hash, title, host_addr, tunnel=None):
+    """tunnel, if given, is 'relay_host:relay_port' for a tunnel_relay.py
+    instance this host registered with — additive and backward compatible,
+    same as the optional PRICE wire verb: an event without it just means
+    'connect directly to host_addr', same as before this field existed."""
+    event = identity.sign_event('publish', content_hash=content_hash, title=title,
+                                 host=host_addr, tunnel=tunnel)
     return post_event(relay_url, event)
 
 

@@ -73,8 +73,13 @@ def build_parser():
     p_host.add_argument('--price', type=int, default=0, help='sats to charge per download (default: free)')
     p_host.add_argument('--relay', action='append', default=[], help='relay URL to announce on (repeatable)')
     p_host.add_argument('--advertise-host', default='127.0.0.1',
-                         help='address to tell the relay to advertise (no NAT traversal here — '
-                              'set this to your real reachable IP if hosting off localhost)')
+                         help='address to tell the relay to advertise (set this to your real '
+                              'reachable IP if hosting off localhost — or use --tunnel if you '
+                              'have no reachable address at all, e.g. behind NAT/CGNAT)')
+    p_host.add_argument('--tunnel', metavar='RELAY_HOST:PORT',
+                         help='tunnel_relay.py address to register with instead of relying on a '
+                              'reachable inbound port — see tunnel_relay.py. Downloaders connect '
+                              'through the relay, not to you directly')
 
     p_discover = sub.add_parser('discover', help='list real content announced on one or more relays')
     p_discover.add_argument('--relay', action='append', default=['http://127.0.0.1:9101'],
@@ -103,6 +108,13 @@ def build_parser():
     p_subscribe.add_argument('target_pubkey')
     p_subscribe.add_argument('--relay', default='http://127.0.0.1:9101')
 
+    p_web = sub.add_parser('web', help='local web UI — discover/host/download/like/subscribe '
+                                        'from a browser instead of the CLI')
+    p_web.add_argument('--port', type=int, default=8080)
+    p_web.add_argument('--bind', default='127.0.0.1',
+                        help='bind address (default 127.0.0.1 — local only; no auth is built, '
+                             'so only widen this on a network you trust)')
+
     return parser
 
 
@@ -113,13 +125,24 @@ def cmd_whoami(args):
 
 
 def cmd_host(args):
+    import threading
     import node
     identity = node.load_or_create_identity()
     entry = node.find_manifest_entry(args.archive_dir, args.file)
     for relay_url in args.relay:
         host_addr = f'{args.advertise_host}:{args.port}'
-        result = node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr)
+        result = node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr,
+                               tunnel=args.tunnel)
         print(f"announced on {relay_url}: {result}")
+    if args.tunnel:
+        relay_host, relay_port = args.tunnel.rsplit(':', 1)
+        leaves = node.load_leaves(args.archive_dir, entry['sha256'])
+        archive_dir = os.path.expanduser(args.archive_dir)
+        file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
+        threading.Thread(target=node.run_host_tunnel,
+                          args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
+                                file_path, args.price),
+                          daemon=True).start()
     node.run_host_server(args.archive_dir, args.file, args.port, price=args.price)
 
 
@@ -139,9 +162,8 @@ def cmd_download(args):
     if args.from_addr:
         # skips discovery entirely, so no possession challenge, reputation,
         # or auction happens — a deliberate escape hatch, not the normal path
-        host, port = args.from_addr.rsplit(':', 1)
         out_path = args.out or f'download_{args.content_hash or "file"}'
-        node.download(host, int(port), out_path)
+        node.download(args.from_addr, out_path)
         return
     if not args.content_hash:
         sys.exit("need a content_hash (to resolve via --relay) or --from host:port")
@@ -163,9 +185,15 @@ def cmd_subscribe(args):
     print(node.post_event(args.relay, event))
 
 
+def cmd_web(args):
+    import web_ui
+    web_ui.run_web_ui(port=args.port, bind_host=args.bind)
+
+
 NATIVE_COMMANDS = {
     'whoami': cmd_whoami, 'host': cmd_host, 'discover': cmd_discover,
     'download': cmd_download, 'get': cmd_download, 'like': cmd_like, 'subscribe': cmd_subscribe,
+    'web': cmd_web,
 }
 
 

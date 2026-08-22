@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dura</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>dura</h1>
+  <p class="tagline">censorship-resistant video PoC — local control UI</p>
+  <div id="identity" class="identity">loading identity…</div>
+</header>
+
+<nav id="tabs">
+  <button class="tab-btn active" data-tab="discover">Discover</button>
+  <button class="tab-btn" data-tab="host">Host</button>
+  <button class="tab-btn" data-tab="downloads">Downloads</button>
+  <button class="tab-btn" data-tab="identity-tab">Identity</button>
+</nav>
+
+<main>
+  <section id="discover" class="tab-panel active">
+    <h2>Discover</h2>
+    <form id="discover-form" class="inline-form">
+      <label>Relay(s), comma-separated
+        <input type="text" id="discover-relays" value="http://127.0.0.1:9101">
+      </label>
+      <button type="submit">Refresh</button>
+    </form>
+    <table id="discover-table">
+      <thead><tr><th>Title</th><th>Content hash</th><th>Host</th><th>Tunnel</th><th>By</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="host" class="tab-panel">
+    <h2>Host a file</h2>
+    <form id="host-form">
+      <label>Archive directory (containing .ott/)
+        <input type="text" id="host-archive-dir" placeholder="real_archive" required>
+      </label>
+      <label>File name (optional, default: most recent)
+        <input type="text" id="host-file-name">
+      </label>
+      <label>Port
+        <input type="number" id="host-port" value="9201">
+      </label>
+      <label>Price (sats, 0 = free)
+        <input type="number" id="host-price" value="0">
+      </label>
+      <label>Relay(s), comma-separated
+        <input type="text" id="host-relays" value="http://127.0.0.1:9101">
+      </label>
+      <label>Advertise host
+        <input type="text" id="host-advertise" value="127.0.0.1">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="host-tunnel-enabled">
+        Behind NAT — use a tunnel relay
+      </label>
+      <label id="host-tunnel-addr-row" class="hidden">Tunnel relay (host:port)
+        <input type="text" id="host-tunnel-addr" placeholder="127.0.0.1:9199">
+      </label>
+      <button type="submit">Start hosting</button>
+    </form>
+    <div id="host-result"></div>
+    <h3>Active hosts (this session)</h3>
+    <table id="hosts-table">
+      <thead><tr><th>Name</th><th>Port</th><th>Price</th><th>Tunnel</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="downloads" class="tab-panel">
+    <h2>Download</h2>
+    <form id="download-form">
+      <label>Content hash
+        <input type="text" id="download-hash" required>
+      </label>
+      <label>Relay(s), comma-separated
+        <input type="text" id="download-relays" value="http://127.0.0.1:9101">
+      </label>
+      <label>Output path (optional)
+        <input type="text" id="download-out">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="download-lightning">
+        Pay over Lightning if priced
+      </label>
+      <button type="submit">Download</button>
+    </form>
+    <table id="jobs-table">
+      <thead><tr><th>Job</th><th>Content hash</th><th>Progress</th><th>Status</th><th>Result</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="identity-tab" class="tab-panel">
+    <h2>Identity &amp; reputation</h2>
+    <p>Your pubkey: <code id="identity-pubkey">…</code></p>
+    <form id="reputation-form" class="inline-form">
+      <label>Look up reputation for pubkey
+        <input type="text" id="reputation-pubkey" placeholder="peer pubkey (hex)">
+      </label>
+      <button type="submit">Check</button>
+    </form>
+    <div id="reputation-result"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

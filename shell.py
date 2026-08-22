@@ -13,6 +13,7 @@ completions (which complete against the real archive, not a fixed list):
 last `discover`; `subscribe` completes against pubkeys actually seen.
 """
 import cmd
+import os
 import shlex
 import threading
 
@@ -78,14 +79,17 @@ class DuraShell(cmd.Cmd):
 
     def do_host(self, arg):
         """host <archive_dir> [--file NAME] [--port N] [--price SAT] [--relay URL]
-        [--no-announce] [--advertise-host HOST]
+        [--no-announce] [--advertise-host HOST] [--tunnel RELAY_HOST:PORT]
         — serve a real archived file in a background thread (shell stays usable),
         announcing it on --relay (default: your session's default relay — see `relay`)
-        unless --no-announce is given. --price sets what download charges (default free)."""
+        unless --no-announce is given. --price sets what download charges (default free).
+        --tunnel registers with a tunnel_relay.py instead of relying on a reachable
+        inbound port — for hosting behind NAT/CGNAT."""
         parts = shlex.split(arg)
         if not parts:
             print('  usage: host <archive_dir> [--file NAME] [--port N] [--price SAT] '
-                  '[--relay URL] [--no-announce] [--advertise-host HOST]')
+                  '[--relay URL] [--no-announce] [--advertise-host HOST] '
+                  '[--tunnel RELAY_HOST:PORT]')
             return
         archive_dir = parts[0]
         file_name = None
@@ -94,6 +98,7 @@ class DuraShell(cmd.Cmd):
         relay = self.default_relay
         no_announce = '--no-announce' in parts
         advertise_host = '127.0.0.1'
+        tunnel = None
         i = 1
         while i < len(parts):
             if parts[i] == '--file' and i + 1 < len(parts):
@@ -106,22 +111,37 @@ class DuraShell(cmd.Cmd):
                 i += 1; relay = parts[i]
             elif parts[i] == '--advertise-host' and i + 1 < len(parts):
                 i += 1; advertise_host = parts[i]
+            elif parts[i] == '--tunnel' and i + 1 < len(parts):
+                i += 1; tunnel = parts[i]
             i += 1
 
         entry = node.find_manifest_entry(archive_dir, file_name)
         if relay and not no_announce:
             result = node.publish(self.identity, relay, entry['sha256'], entry['name'],
-                                   f'{advertise_host}:{port}')
+                                   f'{advertise_host}:{port}', tunnel=tunnel)
             print(f'  announced on {relay}: {result}')
         elif not relay:
             print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
+        if tunnel:
+            relay_host, relay_port = tunnel.rsplit(':', 1)
+            leaves = node.load_leaves(archive_dir, entry['sha256'])
+            expanded_dir = os.path.expanduser(archive_dir)
+            file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
+            tt = threading.Thread(target=node.run_host_tunnel,
+                                   args=(relay_host, int(relay_port), entry['sha256'], entry,
+                                         leaves, file_path, price),
+                                   kwargs={'quiet': True}, daemon=True)
+            tt.start()
+            self._host_threads.append(tt)
         t = threading.Thread(target=node.run_host_server,
                               args=(archive_dir, file_name, port),
                               kwargs={'quiet': True, 'price': price}, daemon=True)
         t.start()
         self._host_threads.append(t)
         price_note = f', {price} sat/download' if price else ', free'
-        print(f'  hosting {entry["name"]} on port {port} in the background{price_note} — shell still usable')
+        tunnel_note = f', tunneled via {tunnel}' if tunnel else ''
+        print(f'  hosting {entry["name"]} on port {port} in the background{price_note}{tunnel_note} '
+              f'— shell still usable')
 
     def do_relay(self, arg):
         """relay [port]  — run a real discovery relay in the background (default port 9101),
