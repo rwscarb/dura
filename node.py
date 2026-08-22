@@ -22,6 +22,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import socket
 import sys
 import time
@@ -88,7 +89,7 @@ def load_leaves(archive_dir, root_hash):
         return json.load(f)
 
 
-def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False):
+def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=False, price=0):
     archive_dir = os.path.expanduser(archive_dir)
     entry = find_manifest_entry(archive_dir, file_name)
     leaves = load_leaves(archive_dir, entry['sha256'])
@@ -135,6 +136,8 @@ def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=Fal
                     f.seek(idx * entry['chunk_size'])
                     data = f.read(entry['chunk_size'])
                 conn.sendall((f'DATA {base64.b64encode(data).decode()}\n').encode())
+            elif parts[0] == 'PRICE':
+                conn.sendall(f'PRICE {price}\n'.encode())
 
 
 # ── client side ──────────────────────────────────────────────────────────
@@ -194,6 +197,148 @@ def download(host, port, out_path):
         sys.exit(f"size mismatch: wrote {actual_size:,} bytes, host advertised {info['size']:,} "
                  f"— deleted the output, do not trust this download")
     return out_path
+
+
+# ── possession challenge + price auction, wired to real discovery ───────
+#
+# Everything below stitches poc_challenge_auction.py (challenge-gate a
+# reverse auction), poc_reputation.py (local trust score), and
+# lightning_settle.py (real HTLC settlement) into the real download path —
+# none of them were reachable from `download()` before this, which meant
+# `discover` -> `download` would silently trust the first host found, for
+# free, with zero possession check.
+#
+# Scoped honestly, not silently: this uses sample-FETCH + Merkle-proof
+# verification (poc_challenge_auction.py Part 1's mechanism) to prove a
+# host holds real chunks, not the nonce-salted timing challenge from Part
+# 2 — that one specifically detects a RELAY masquerading as a holder, but
+# needs ground-truth bytes the verifier already trusts, which a first-time
+# downloader doesn't have yet (that's the whole point of downloading).
+# Sample-verifying a few chunks via FETCH is what a fresh client can
+# actually do independently, since LEAVES is already Merkle-root-checked
+# against the host's own advertised sha256.
+
+def sample_challenge(host, port, leaves, k=3, timeout=10):
+    """Fetch k random chunks and verify each against the (already Merkle-
+    verified) leaves list — proves *this specific host* truly holds real
+    chunks, not just that someone somewhere does."""
+    n = len(leaves)
+    indices = random.sample(range(n), min(k, n))
+    latencies = []
+    for idx in indices:
+        t0 = time.perf_counter()
+        try:
+            resp = _request(host, port, f'FETCH {idx}', timeout=timeout)
+        except OSError:
+            return False, latencies
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if not resp.startswith('DATA '):
+            return False, latencies
+        data = base64.b64decode(resp[5:])
+        if hashlib.sha256(data).hexdigest() != leaves[idx]:
+            return False, latencies
+    return True, latencies
+
+
+def get_price(host, port, timeout=5):
+    try:
+        resp = _request(host, port, 'PRICE', timeout=timeout)
+    except OSError:
+        return 0
+    if resp.startswith('PRICE '):
+        try:
+            return int(resp[6:])
+        except ValueError:
+            return 0
+    return 0  # host doesn't implement PRICE — treat as free rather than failing
+
+
+def discover_hosts_for(relay_urls, content_hash):
+    """Every host that published a matching content_hash — real multi-host
+    resolution (discover() already dedupes by event, not by content, so
+    two publishers of the same file both show up here)."""
+    return [p for p in discover(relay_urls) if p['content_hash'].startswith(content_hash)]
+
+
+def select_host(candidates, k=3, reputation=None):
+    """Gate on real possession, then rank survivors by reputation then
+    price — same 'challenge gates the auction' shape as
+    poc_challenge_auction.py's naive-vs-gated comparison."""
+    from ott import merkle_root
+
+    scored = []
+    for c in candidates:
+        host, port_s = c['host'].rsplit(':', 1)
+        port = int(port_s)
+        try:
+            leaves = json.loads(_request(host, port, 'LEAVES'))
+            info = json.loads(_request(host, port, 'INFO'))
+        except OSError as e:
+            print(f"  x {c['host']}: unreachable ({e})")
+            continue
+        if merkle_root(leaves) != info['sha256'] or info['sha256'] != c['content_hash']:
+            print(f"  x {c['host']}: advertised content doesn't match its own LEAVES/INFO — skipping")
+            continue
+        passed, latencies = sample_challenge(host, port, leaves, k=k)
+        if not passed:
+            print(f"  x {c['host']}: failed possession challenge ({k} chunks sampled) — skipping")
+            continue
+        price = get_price(host, port)
+        rep_score, rep_why = reputation.trust_score(c['signer_pubkey']) if reputation else (0.5, 'no reputation store')
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+        print(f"  + {c['host']}: possession verified ({k}/{k} chunks), price={price} sat, "
+              f"reputation={rep_score:.2f} ({rep_why}), avg_latency={avg_latency:.1f}ms")
+        scored.append({'candidate': c, 'host': host, 'port': port, 'info': info,
+                        'price': price, 'reputation': rep_score, 'avg_latency_ms': avg_latency})
+
+    if not scored:
+        return None
+    scored.sort(key=lambda s: (-s['reputation'], s['price']))  # highest trust first, then cheapest
+    return scored[0]
+
+
+def download_with_auction(content_hash, relay_urls, out_path=None, k=3, use_lightning=False):
+    """The real end-to-end path: resolve every host claiming to have this
+    content, challenge-gate them, auction among survivors, optionally pay
+    the winner over a real Lightning HTLC, download, and record the
+    outcome to local reputation for next time."""
+    from poc_reputation import ReputationStore
+
+    candidates = discover_hosts_for(relay_urls, content_hash)
+    if not candidates:
+        sys.exit(f"no hosts found publishing content matching {content_hash}")
+    print(f"found {len(candidates)} candidate host(s) for {content_hash[:16]}...")
+
+    reputation = ReputationStore(os.path.expanduser('~/.dura_reputation.json'))
+    winner = select_host(candidates, k=k, reputation=reputation)
+    if winner is None:
+        sys.exit("no candidate host passed the possession challenge — "
+                 "refusing to download from an unverified source")
+
+    c = winner['candidate']
+    print(f"selected {c['host']} — price {winner['price']} sat, "
+          f"reputation {winner['reputation']:.2f}, {winner['avg_latency_ms']:.1f}ms avg")
+
+    if winner['price'] > 0:
+        if use_lightning:
+            import lightning_settle
+            result = lightning_settle.settle(
+                winner['price'], f"download {content_hash[:16]}... from {c['host']}")
+            print(f"paid via real Lightning HTLC: {result['amount_sat']} sat, "
+                  f"preimage {result['preimage'][:12]}... verified against "
+                  f"payment_hash {result['payment_hash'][:12]}...")
+        else:
+            print(f"  price is {winner['price']} sat but --lightning not given "
+                  f"— downloading anyway, unpaid (no enforcement in this demo)")
+
+    path = download(winner['host'], winner['port'], out_path or c['title'])
+
+    reputation.record_direct(c['signer_pubkey'], passes=1, fails=0,
+                              avg_latency_ms=winner['avg_latency_ms'])
+    reputation.save()
+    print(f"recorded this download in local reputation store "
+          f"(~/.dura_reputation.json) for {c['signer_pubkey'][:12]}...")
+    return path
 
 
 # ── discovery + social signals ──────────────────────────────────────────

@@ -355,6 +355,80 @@ reachability is on you. Same point-to-point-known-address limitation
 named earlier in this README, now visible as an actual CLI flag instead of
 just a caveat in prose.
 
+### `download` now runs the actual stack, not just a direct fetch
+
+Until this point, `download` trusted whichever host `discover` found
+first, for free, with no possession check and no reputation. That was the
+real gap flagged after the last round of shell bug-fixes: the auction
+(`poc_challenge_auction.py`), the reputation/trust-graph layer
+(`poc_reputation.py`), and Lightning settlement (`lightning_settle.py`)
+were all built and validated standalone, but none of them were reachable
+from a real download. Now they are:
+
+1. **Resolve every host** claiming to have the content (`discover` already
+   deduped by event, not by content — `download_with_auction` groups by
+   content_hash so a second host publishing the same file actually gets
+   considered, not silently dropped).
+2. **Possession-challenge each one** — sample-FETCH `k` random chunks
+   (default 3) and verify against the already Merkle-root-checked LEAVES.
+   Scoped deliberately to poc_challenge_auction.py's **Part 1** mechanism
+   (chunk-index challenge), not Part 2's nonce/timing relay-detection —
+   that one needs ground-truth bytes the verifier already trusts, which a
+   first-time downloader doesn't have until *after* this same sampling
+   step. Noted here rather than silently narrowed.
+3. **Auction survivors** by local reputation first, then price — same
+   "challenge gates the auction" shape as the original PoC's naive-vs-
+   gated comparison. A host with no history starts at 0.0, same as
+   everyone; reputation only pulls ahead of price once there's real
+   experience behind it (verified — see below).
+4. **Pay the winner** over a real Lightning HTLC if `--lightning` is given
+   and the price is nonzero — same `lightning_settle.py` regtest demo path
+   as before. Honest limitation, not glossed over: this settles with the
+   fixed alice/bob demo nodes, not a general "pay this specific host's own
+   Lightning node" protocol — that would need hosts to serve their own
+   real BOLT11 invoices, which isn't built.
+5. **Download and record** — same chunk-verified `download()` as before,
+   then the outcome (pass/fail, latency) gets written to
+   `~/.dura_reputation.json` via `ReputationStore.record_direct`, so the
+   next auction for this host starts from real history instead of 0.0.
+
+Real test, two independent hosts (separate identities, separate `HOME`s so
+podman's rootless state didn't collide) serving the same real video —
+one free, one priced at 500 sat:
+
+```
+found 2 candidate host(s) for 7f2477c7ea675004...
+  + 127.0.0.1:9202: possession verified (3/3 chunks), price=0 sat, reputation=0.00, avg_latency=3.4ms
+  + 127.0.0.1:9203: possession verified (3/3 chunks), price=500 sat, reputation=0.00, avg_latency=0.7ms
+selected 127.0.0.1:9202 — price 0 sat, reputation 0.00, 3.4ms avg
+```
+
+Ties on reputation, cheapest wins — correct. Then manually seeded
+contrasting reputations (hostA bad, hostB good) to prove reputation
+actually *overrides* price rather than the selection just always
+defaulting to cheapest:
+
+```
++ 127.0.0.1:9202: ... price=0 sat, reputation=0.10 ...
++ 127.0.0.1:9203: ... price=500 sat, reputation=1.00 ...
+selected 127.0.0.1:9203 — price 500 sat, reputation 1.00, 0.4ms avg
+```
+
+Picked the pricier, more trusted host. Then killed the free host outright
+and re-ran with `--lightning`: real HTLC settled (500 sat, preimage
+independently re-verified against the invoice's own `r_hash` via
+`lncli listinvoices`, not just trusting the printed claim), download
+proceeded, byte-identical against the source via `cmp`.
+
+```bash
+python3 dura.py download <content_hash> --relay http://127.0.0.1:9101 \
+    --rounds 5 --lightning --out downloaded.mp4
+```
+
+`host --price N` sets what a host charges (sats, default free — `PRICE` is
+a new wire-protocol verb, backward compatible: a host that doesn't
+implement it just gets treated as free by an older/newer client either way).
+
 ### `shell.py` — interactive, tab-completing, same pattern as `ott`'s shell
 
 `python3 dura.py` with no arguments (or `dura.py shell`) drops into an

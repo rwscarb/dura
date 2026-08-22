@@ -77,17 +77,20 @@ class DuraShell(cmd.Cmd):
         print(f'  {self.identity.pubkey_hex()}')
 
     def do_host(self, arg):
-        """host <archive_dir> [--file NAME] [--port N] [--relay URL] [--no-announce] [--advertise-host HOST]
+        """host <archive_dir> [--file NAME] [--port N] [--price SAT] [--relay URL]
+        [--no-announce] [--advertise-host HOST]
         — serve a real archived file in a background thread (shell stays usable),
         announcing it on --relay (default: your session's default relay — see `relay`)
-        unless --no-announce is given."""
+        unless --no-announce is given. --price sets what download charges (default free)."""
         parts = shlex.split(arg)
         if not parts:
-            print('  usage: host <archive_dir> [--file NAME] [--port N] [--relay URL] [--no-announce] [--advertise-host HOST]')
+            print('  usage: host <archive_dir> [--file NAME] [--port N] [--price SAT] '
+                  '[--relay URL] [--no-announce] [--advertise-host HOST]')
             return
         archive_dir = parts[0]
         file_name = None
         port = 9201
+        price = 0
         relay = self.default_relay
         no_announce = '--no-announce' in parts
         advertise_host = '127.0.0.1'
@@ -97,6 +100,8 @@ class DuraShell(cmd.Cmd):
                 i += 1; file_name = parts[i]
             elif parts[i] == '--port' and i + 1 < len(parts):
                 i += 1; port = int(parts[i])
+            elif parts[i] == '--price' and i + 1 < len(parts):
+                i += 1; price = int(parts[i])
             elif parts[i] == '--relay' and i + 1 < len(parts):
                 i += 1; relay = parts[i]
             elif parts[i] == '--advertise-host' and i + 1 < len(parts):
@@ -111,10 +116,12 @@ class DuraShell(cmd.Cmd):
         elif not relay:
             print('  no relay set (run `relay` first, or pass --relay) — hosting without announcing')
         t = threading.Thread(target=node.run_host_server,
-                              args=(archive_dir, file_name, port), kwargs={'quiet': True}, daemon=True)
+                              args=(archive_dir, file_name, port),
+                              kwargs={'quiet': True, 'price': price}, daemon=True)
         t.start()
         self._host_threads.append(t)
-        print(f'  hosting {entry["name"]} on port {port} in the background — shell still usable')
+        price_note = f', {price} sat/download' if price else ', free'
+        print(f'  hosting {entry["name"]} on port {port} in the background{price_note} — shell still usable')
 
     def do_relay(self, arg):
         """relay [port]  — run a real discovery relay in the background (default port 9101),
@@ -143,34 +150,32 @@ class DuraShell(cmd.Cmd):
                   f'host={r["host"]}  by={r["signer_pubkey"][:12]}...')
 
     def do_download(self, arg):
-        """download <content_hash_or_prefix> [--out FILE] [--relay URL]
-        — actually download and chunk-verify a file. Tab-completes against
-        the last `discover`."""
+        """download <content_hash_or_prefix> [--out FILE] [--relay URL] [--rounds N] [--lightning]
+        — resolve every host publishing this content, possession-challenge
+        each one (N chunks sampled, default 3), auction survivors by
+        reputation then price, optionally pay the winner over a real
+        Lightning HTLC, download, and record the outcome to local
+        reputation. Tab-completes against the last `discover`."""
         parts = shlex.split(arg)
         if not parts:
-            print('  usage: download <content_hash_or_prefix> [--out FILE] [--relay URL]')
+            print('  usage: download <content_hash_or_prefix> [--out FILE] [--relay URL] [--rounds N] [--lightning]')
             return
         prefix = parts[0]
         out = None
         relay = self.default_relay
+        rounds = 3
+        use_lightning = '--lightning' in parts
         i = 1
         while i < len(parts):
             if parts[i] == '--out' and i + 1 < len(parts):
                 i += 1; out = parts[i]
             elif parts[i] == '--relay' and i + 1 < len(parts):
                 i += 1; relay = parts[i]
+            elif parts[i] == '--rounds' and i + 1 < len(parts):
+                i += 1; rounds = int(parts[i])
             i += 1
 
-        match = next((r for r in self._last_discovery if r['content_hash'].startswith(prefix)), None)
-        if not match:
-            results = node.discover([relay])
-            self._last_discovery = results
-            match = next((r for r in results if r['content_hash'].startswith(prefix)), None)
-        if not match:
-            print(f'  no content matching {prefix} — run discover first')
-            return
-        host, port = match['host'].rsplit(':', 1)
-        node.download(host, int(port), out or match['title'])
+        node.download_with_auction(prefix, [relay], out_path=out, k=rounds, use_lightning=use_lightning)
 
     def do_like(self, arg):
         """like <content_hash> [--relay URL]  — sign and post a real like event."""

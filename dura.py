@@ -70,6 +70,7 @@ def build_parser():
     p_host.add_argument('archive_dir', help='directory containing .ott/ (e.g. real_archive)')
     p_host.add_argument('--file', help='which archived file, if more than one (default: most recent)')
     p_host.add_argument('--port', type=int, default=9201)
+    p_host.add_argument('--price', type=int, default=0, help='sats to charge per download (default: free)')
     p_host.add_argument('--relay', action='append', default=[], help='relay URL to announce on (repeatable)')
     p_host.add_argument('--advertise-host', default='127.0.0.1',
                          help='address to tell the relay to advertise (no NAT traversal here — '
@@ -79,12 +80,19 @@ def build_parser():
     p_discover.add_argument('--relay', action='append', default=['http://127.0.0.1:9101'],
                              help='relay URL to query (repeatable)')
 
-    p_download = sub.add_parser('download', help='actually download a file from a real host, chunk-verified')
+    p_download = sub.add_parser('download', help='discover, possession-challenge, auction, optionally pay, '
+                                                   'and download from the winning host — chunk-verified')
     p_download.add_argument('content_hash', nargs='?', help='content hash to resolve via --relay')
-    p_download.add_argument('--from', dest='from_addr', help='host:port to connect to directly, skipping discovery')
+    p_download.add_argument('--from', dest='from_addr', help='host:port to connect to directly, skipping '
+                             'discovery/auction entirely (no possession challenge, no reputation, no payment)')
     p_download.add_argument('--relay', action='append', default=['http://127.0.0.1:9101'],
                              help='relay URL to resolve content_hash against (repeatable)')
     p_download.add_argument('--out', help='output path (default: the advertised filename)')
+    p_download.add_argument('--challenge-rounds', type=int, default=3,
+                             help='chunks to sample-verify per candidate host before trusting it (default: 3)')
+    p_download.add_argument('--lightning', action='store_true',
+                             help='pay the winning host over a real Lightning HTLC if it has a price '
+                                  '(needs the lightning/ stack up — see lightning/README.md)')
 
     p_like = sub.add_parser('like', help='sign and post a real like event')
     p_like.add_argument('content_hash')
@@ -111,7 +119,7 @@ def cmd_host(args):
         host_addr = f'{args.advertise_host}:{args.port}'
         result = node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr)
         print(f"announced on {relay_url}: {result}")
-    node.run_host_server(args.archive_dir, args.file, args.port)
+    node.run_host_server(args.archive_dir, args.file, args.port, price=args.price)
 
 
 def cmd_discover(args):
@@ -128,19 +136,16 @@ def cmd_discover(args):
 def cmd_download(args):
     import node
     if args.from_addr:
+        # skips discovery entirely, so no possession challenge, reputation,
+        # or auction happens — a deliberate escape hatch, not the normal path
         host, port = args.from_addr.rsplit(':', 1)
-        title = None
-    else:
-        if not args.content_hash:
-            sys.exit("need a content_hash (to resolve via --relay) or --from host:port")
-        results = node.discover(args.relay)
-        match = next((r for r in results if r['content_hash'].startswith(args.content_hash)), None)
-        if not match:
-            sys.exit(f"no published content matching {args.content_hash} found on {args.relay}")
-        host, port = match['host'].rsplit(':', 1)
-        title = match['title']
-    out_path = args.out or title or f'download_{args.content_hash or "file"}'
-    node.download(host, int(port), out_path)
+        out_path = args.out or f'download_{args.content_hash or "file"}'
+        node.download(host, int(port), out_path)
+        return
+    if not args.content_hash:
+        sys.exit("need a content_hash (to resolve via --relay) or --from host:port")
+    node.download_with_auction(args.content_hash, args.relay, out_path=args.out,
+                                k=args.challenge_rounds, use_lightning=args.lightning)
 
 
 def cmd_like(args):
