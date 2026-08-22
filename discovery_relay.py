@@ -70,11 +70,17 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(out).encode())
 
 
-def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9101
+def run_relay_server(port):
+    """Split out from main() so shell.py can run a relay in a background
+    thread — same pattern as node.run_host_server."""
     srv = ThreadingHTTPServer(('0.0.0.0', port), RelayHandler)
     print(f"[relay:{port}] up, no opinion on content, just store-and-forward", flush=True)
     srv.serve_forever()
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9101
+    run_relay_server(port)
 
 
 if __name__ == '__main__':

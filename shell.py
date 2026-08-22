@@ -16,6 +16,7 @@ import cmd
 import shlex
 import threading
 
+import discovery_relay
 import node
 
 
@@ -83,6 +84,17 @@ class DuraShell(cmd.Cmd):
         t.start()
         self._host_threads.append(t)
         print(f'  hosting {entry["name"]} on port {port} in the background — shell still usable')
+
+    def do_relay(self, arg):
+        """relay [port]  — run a real discovery relay in the background (default port 9101),
+        so you don't need a separate terminal for one. Sets it as the default relay for
+        discover/download/like/subscribe in this session."""
+        port = int(arg.strip()) if arg.strip() else 9101
+        t = threading.Thread(target=discovery_relay.run_relay_server, args=(port,), daemon=True)
+        t.start()
+        self._host_threads.append(t)
+        self.default_relay = f'http://127.0.0.1:{port}'
+        print(f'  relay running on port {port} in the background — set as your default relay')
 
     def do_discover(self, arg):
         """discover [relay_url ...]  — list content announced on one or more relays
@@ -169,6 +181,7 @@ class DuraShell(cmd.Cmd):
 
     def do_w(self, arg): return self.do_whoami(arg)
     def do_h(self, arg): return self.do_host(arg)
+    def do_r(self, arg): return self.do_relay(arg)
     def do_disc(self, arg): return self.do_discover(arg)
     def do_dl(self, arg): return self.do_download(arg)
     def do_l(self, arg): return self.do_like(arg)

@@ -359,8 +359,18 @@ just a caveat in prose.
 
 `python3 dura.py` with no arguments (or `dura.py shell`) drops into an
 interactive shell — same `cmd.Cmd` + readline pattern as `ott`'s own shell,
-same conventions: short aliases (`w`/`h`/`disc`/`dl`/`l`/`sub`), `help` or
-`?` for commands, `Ctrl-D` or `q` to exit, tab completes.
+same conventions: short aliases (`w`/`h`/`r`/`disc`/`dl`/`l`/`sub`), `help`
+or `?` for commands, `Ctrl-D` or `q` to exit, tab completes.
+
+`relay` runs a real discovery relay in the background too, same pattern as
+`host` — the whole flow (relay, host, discover, download, like, subscribe)
+runs from one shell session, no second terminal required. Discovered
+running it that way for real (`host` with no relay running produces
+"unreachable, skipped, nothing found," `discover` alone can't conjure a
+relay that isn't there — real friction that surfaced from actually using
+it, not a hypothetical). `relay` also sets itself as the session's default
+relay, so `discover`/`download`/`like`/`subscribe` don't need `--relay`
+repeated every time.
 
 Completion resolves against real state, not a fixed list — same idea as
 `ott`'s completions (which complete against the real archive). `download`
@@ -368,10 +378,12 @@ and `like` tab-complete against content hashes actually seen in the last
 `discover`; `subscribe` completes against pubkeys actually seen:
 
 ```
-dura> host real_archive --port 9202 --relay http://127.0.0.1:9101
-  hosting real_video.mp4 on port 9202 in the background — shell still usable
-dura> discover http://127.0.0.1:9101
-  'real_video.mp4'   hash=7f2477c7ea675004...  host=127.0.0.1:9202  by=10cbc58de88f...
+dura> relay
+  relay running on port 9101 in the background — set as your default relay
+dura> host real_archive --relay http://127.0.0.1:9101
+  hosting real_video.mp4 on port 9201 in the background — shell still usable
+dura> discover
+  'real_video.mp4'   hash=7f2477c7ea675004...  host=127.0.0.1:9201  by=409a15dcfc59...
 dura> download 7f24<TAB>
 7f2477c7ea675004ad5dbab6dc7c44327c724b880cc389807df1965b77966acc
 dura> download 7f2477c7ea675004ad5dbab6dc7c44327c724b880cc389807df1965b77966acc
