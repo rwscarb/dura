@@ -17,9 +17,28 @@ import os
 import shlex
 import threading
 
+import dht
 import discovery_relay
 import node
 import web_ui
+
+
+def _bg(fn, *args, **kwargs):
+    """Wrap a background-thread target so a real failure (bad bind address,
+    port already in use, whatever) prints the shell's own '  ✗ ...' one-
+    liner instead of Python's default thread traceback landing raw in the
+    middle of the prompt. onecmd()'s try/except below only ever covers the
+    synchronous part of a do_* call -- host/relay/serve all hand the actual
+    work to a background thread, and nothing catches what *that* raises
+    once do_* has already returned and printed its 'running in the
+    background' line. Every threading.Thread(target=...) in this file
+    should go through this instead of calling the real function directly."""
+    try:
+        fn(*args, **kwargs)
+    except SystemExit as e:
+        print(f'\n  ✗ {e}')
+    except Exception as e:
+        print(f'\n  ✗ {type(e).__name__}: {e}')
 
 
 class DuraShell(cmd.Cmd):
@@ -35,6 +54,7 @@ class DuraShell(cmd.Cmd):
         self._last_discovery = []   # cache of the last `discover` results, for tab completion
         self._host_threads = []     # background host() threads started this session
         self.default_relay = 'http://127.0.0.1:9101'
+        self.dht_node = None        # active dht.DHTNode, once `dht start` has run
 
     def preloop(self):
         try:
@@ -142,14 +162,15 @@ class DuraShell(cmd.Cmd):
             relay_host, relay_port = tunnel.rsplit(':', 1)
             expanded_dir = os.path.expanduser(archive_dir)
             file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
-            tt = threading.Thread(target=node.run_host_tunnel,
-                                   args=(relay_host, int(relay_port), entry['sha256'], entry,
-                                         all_leaves[entry['sha256']], file_path, price),
+            tt = threading.Thread(target=_bg,
+                                   args=(node.run_host_tunnel, relay_host, int(relay_port),
+                                         entry['sha256'], entry, all_leaves[entry['sha256']],
+                                         file_path, price),
                                    kwargs={'quiet': True}, daemon=True)
             tt.start()
             self._host_threads.append(tt)
-        t = threading.Thread(target=node.run_host_server,
-                              args=(archive_dir, file_name, port),
+        t = threading.Thread(target=_bg,
+                              args=(node.run_host_server, archive_dir, file_name, port),
                               kwargs={'quiet': True, 'price': price}, daemon=True)
         t.start()
         self._host_threads.append(t)
@@ -167,8 +188,8 @@ class DuraShell(cmd.Cmd):
         so you don't need a separate terminal for one. Sets it as the default relay for
         discover/download/like/subscribe in this session."""
         port = int(arg.strip()) if arg.strip() else 9101
-        t = threading.Thread(target=discovery_relay.run_relay_server,
-                              args=(port,), kwargs={'quiet': True}, daemon=True)
+        t = threading.Thread(target=_bg, args=(discovery_relay.run_relay_server, port),
+                              kwargs={'quiet': True}, daemon=True)
         t.start()
         self._host_threads.append(t)
         self.default_relay = f'http://127.0.0.1:{port}'
@@ -183,7 +204,7 @@ class DuraShell(cmd.Cmd):
         parts = shlex.split(arg)
         bind_host = parts[0] if len(parts) > 0 else '127.0.0.1'
         port = int(parts[1]) if len(parts) > 1 else 8080
-        t = threading.Thread(target=web_ui.run_web_ui, args=(port,),
+        t = threading.Thread(target=_bg, args=(web_ui.run_web_ui, port),
                               kwargs={'bind_host': bind_host, 'quiet': True}, daemon=True)
         t.start()
         self._host_threads.append(t)
@@ -193,6 +214,75 @@ class DuraShell(cmd.Cmd):
                   f'from your phone')
         else:
             print(f'  web control UI running at http://{bind_host}:{port}/ in the background')
+
+    def do_dht(self, arg):
+        """dht start [port] [bootstrap_host:port]  — start (or join) a real
+        Kademlia DHT node in the background (default port 8468). No relay
+        needed — once bootstrapped into an existing swarm, peers find each
+        other through the DHT itself. Omit the bootstrap address to start
+        a brand new swarm as its first node.
+        dht announce <content_hash> <host:port> [title]  — announce you're
+        hosting content, on the active node (from the last `dht start`).
+        dht lookup <content_hash>  — look up who's hosting content, via
+        the active node."""
+        parts = shlex.split(arg)
+        if not parts:
+            print('  Usage: dht <start|announce|lookup> ...')
+            return
+        subcmd, rest = parts[0], parts[1:]
+        if subcmd == 'start':
+            port = int(rest[0]) if len(rest) > 0 else 8468
+            bootstrap_spec = rest[1] if len(rest) > 1 else None
+            try:
+                node_obj = dht.DHTNode(port, bootstrap_nodes=dht._parse_bootstrap(bootstrap_spec),
+                                        quiet=True)
+                node_obj.start()
+            except Exception as e:
+                print(f'  ✗ {type(e).__name__}: {e}')
+                return
+            self.dht_node = node_obj
+            joined = f', joined via {bootstrap_spec}' if bootstrap_spec else ' (new swarm)'
+            print(f'  dht node listening on port {port}{joined} — set as the active dht node')
+        elif subcmd == 'announce':
+            if not self.dht_node:
+                print('  no active dht node — run `dht start` first')
+                return
+            if len(rest) < 2:
+                print('  Usage: dht announce <content_hash> <host:port> [title]')
+                return
+            content_hash, host_addr = rest[0], rest[1]
+            title = rest[2] if len(rest) > 2 else None
+            try:
+                self.dht_node.announce(content_hash, host_addr, title=title)
+            except Exception as e:
+                print(f'  ✗ {type(e).__name__}: {e}')
+                return
+            print(f'  announced {content_hash[:16]}... at {host_addr} via dht')
+        elif subcmd == 'lookup':
+            if not self.dht_node:
+                print('  no active dht node — run `dht start` first')
+                return
+            if not rest:
+                print('  Usage: dht lookup <content_hash>')
+                return
+            try:
+                results = self.dht_node.lookup(rest[0])
+            except Exception as e:
+                print(f'  ✗ {type(e).__name__}: {e}')
+                return
+            if not results:
+                print('  nothing found on the dht for that hash')
+                return
+            for r in results:
+                print(f'  host={r["host"]}  title={r.get("title") or "(untitled)"}')
+        else:
+            print(f'  unknown dht subcommand: {subcmd!r}  (start, announce, lookup)')
+
+    def complete_dht(self, text, line, begidx, endidx):
+        parts = shlex.split(line[:begidx])
+        if len(parts) == 1:
+            return [s for s in ('start', 'announce', 'lookup') if s.startswith(text)]
+        return []
 
     def do_discover(self, arg):
         """discover [relay_url ...]  — list content announced on one or more relays
