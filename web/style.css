@@ -163,10 +163,112 @@ td button {
   background: #000;
 }
 
+.qr-toggle {
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.qr-btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.qr-popup {
+  position: absolute;
+  z-index: 50;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.qr-popup.hidden {
+  display: none;
+}
+
+.qr-popup img {
+  display: block;
+  width: 200px;
+  height: 200px;
+  border-radius: 4px;
+}
+
+.qr-url {
+  margin-top: 0.4rem;
+  max-width: 200px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
 #host-result, #reputation-result {
   margin-top: 0.75rem;
   font-size: 0.85rem;
   color: var(--muted);
 }
 
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Narrow phones, notably a folded Galaxy Z Fold's cover screen (~344-374px
+   CSS width) -- everything above this point assumed a normal phone/tablet
+   width and breaks down badly narrower than that: fixed side padding eats
+   a big fraction of the viewport, 5-6 column tables have nowhere to go,
+   and the QR popup's anchor-to-button positioning can push it half off
+   the right edge. */
+@media (max-width: 420px) {
+  body { padding: 0 0.75rem 2rem; }
+
+  h1 { font-size: 1.3rem; }
+  .tagline { font-size: 0.8rem; }
+
+  nav#tabs { flex-wrap: wrap; gap: 0.25rem; }
+  .tab-btn { padding: 0.5rem 0.6rem; font-size: 0.85rem; }
+
+  form, form.inline-form { max-width: none; }
+  form.inline-form { flex-direction: column; align-items: stretch; }
+  button { width: 100%; }
+  .qr-toggle, td button { width: auto; }
+
+  table { font-size: 0.78rem; }
+  th, td { padding: 0.4rem; }
+
+  /* least essential columns first -- keep whatever answers "what is this
+     and can I act on it", drop the rest to a swipe-to-see-more table */
+  #discover-table th:nth-child(4), #discover-table td:nth-child(4),
+  #discover-table th:nth-child(5), #discover-table td:nth-child(5) {
+    display: none;
+  }
+  #hosts-table th:nth-child(4), #hosts-table td:nth-child(4) {
+    display: none;
+  }
+  #jobs-table th:nth-child(1), #jobs-table td:nth-child(1) {
+    display: none;
+  }
+
+  /* the popup's top/left are set inline from the trigger button's
+     position -- on a narrow screen that math can push a 200px-wide box
+     past the right edge, so pin it centered instead of anchored */
+  .qr-popup {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%);
+    max-width: calc(100vw - 2rem);
+  }
+}

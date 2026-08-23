@@ -11,6 +11,7 @@
   <h1>dura</h1>
   <p class="tagline">censorship-resistant video PoC — local control UI</p>
   <div id="identity" class="identity">loading identity…</div>
+  <button type="button" id="phone-qr-toggle" class="qr-toggle">📱 Open on phone</button>
 </header>
 
 <nav id="tabs">
@@ -29,10 +30,10 @@
       </label>
       <button type="submit">Refresh</button>
     </form>
-    <table id="discover-table">
+    <div class="table-wrap"><table id="discover-table">
       <thead><tr><th>Title</th><th>Content hash</th><th>Host</th><th>Tunnel</th><th>By</th><th></th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
   </section>
 
   <section id="host" class="tab-panel">
@@ -67,10 +68,10 @@
     </form>
     <div id="host-result"></div>
     <h3>Active hosts (this session)</h3>
-    <table id="hosts-table">
+    <div class="table-wrap"><table id="hosts-table">
       <thead><tr><th>Name</th><th>Port</th><th>Price</th><th>Tunnel</th><th>Status</th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
   </section>
 
   <section id="downloads" class="tab-panel">
@@ -91,10 +92,10 @@
       </label>
       <button type="submit">Download</button>
     </form>
-    <table id="jobs-table">
+    <div class="table-wrap"><table id="jobs-table">
       <thead><tr><th>Job</th><th>Content hash</th><th>Progress</th><th>Status</th><th>Result</th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
     <div id="player-container"></div>
   </section>
 

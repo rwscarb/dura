@@ -25,12 +25,25 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import node
 
+try:
+    import qrcode  # pip install qrcode -- same package ott.py's own `ott qr` already uses
+    _HAS_QR = True
+except ImportError:
+    _HAS_QR = False
+
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 DEFAULT_RELAY = 'http://127.0.0.1:9101'
 
 _hosts = {}   # host_id -> dict describing an actively-hosted file
 _jobs = {}    # job_id -> dict describing a download's progress/result
 _lock = threading.Lock()
+_lan_url = None   # set once in run_web_ui() -- the base URL a phone on the
+                   # same LAN can actually reach this server at, or None if
+                   # it can't (bound to 127.0.0.1). The client can't compute
+                   # this itself: window.location.origin only reflects
+                   # whatever address the *desktop* browser used to load the
+                   # page, which is 127.0.0.1 the moment someone opens it via
+                   # localhost -- exactly the bug this fixes.
 
 
 def _identity():
@@ -41,6 +54,23 @@ def _as_list(value, default):
     if not value:
         return default
     return [value] if isinstance(value, str) else list(value)
+
+
+def _detect_lan_ip():
+    """Best-effort outbound-facing LAN IP. UDP connect() here never sends a
+    packet -- it just makes the kernel pick a route -- but that's enough to
+    read back the interface address that route would use. Needed because
+    a startup/QR URL naming the literal 0.0.0.0 wildcard bind address is
+    useless: nothing can connect *to* 0.0.0.0 from another device."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
 
 
 def _run_host_job(host_id, archive_dir, file_name, port, price, relay_urls, advertise_host, tunnel):
@@ -117,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/api/whoami':
             return self._json({'pubkey': _identity().pubkey_hex()})
+        if path == '/api/lan-url':
+            return self._json({'url': _lan_url})
         if path == '/api/discover':
             return self._json({'results': node.discover(qs.get('relay') or [DEFAULT_RELAY])})
         if path == '/api/hosts':
@@ -134,6 +166,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'pubkey': pubkey, 'score': score, 'why': why})
         if path.startswith('/api/stream/'):
             return self._handle_stream(path[len('/api/stream/'):])
+        if path == '/api/qr':
+            data = (qs.get('data') or [''])[0]
+            if not data:
+                return self._json({'error': 'data query param required'}, status=400)
+            return self._handle_qr(data)
         self._serve_static(path)
 
     def do_POST(self):
@@ -271,6 +308,28 @@ class Handler(BaseHTTPRequestHandler):
                     return  # client seeked or closed mid-stream -- not an error
                 remaining -= len(chunk)
 
+    def _handle_qr(self, data):
+        """PNG QR code of an arbitrary string -- same qrcode package and
+        same 'encode a URL so a phone can scan instead of type it' idea as
+        ott's own `ott qr`, just rendered as an image for the page to
+        embed instead of printed as terminal ASCII."""
+        if not _HAS_QR:
+            return self._json({'error': 'qrcode not installed on the server -- pip install qrcode'},
+                               status=501)
+        import io
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image()
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        body = buf.getvalue()
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_static(self, path):
         if path == '/':
             path = '/index.html'
@@ -290,15 +349,47 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_web_ui(port=8080, bind_host='127.0.0.1', quiet=False):
+    global _lan_url
     srv = ThreadingHTTPServer((bind_host, port), Handler)
+
+    reachable_host = _detect_lan_ip() if bind_host == '0.0.0.0' else bind_host
+    if bind_host != '127.0.0.1' and reachable_host:
+        _lan_url = f'http://{reachable_host}:{port}/'
+
     if not quiet:
         print(f"[web:{port}] dura control UI at http://{bind_host}:{port}/", flush=True)
+        if bind_host == '127.0.0.1':
+            print("  bound to localhost only -- pass --bind 0.0.0.0 to reach this from your "
+                  "phone (and get a scan-to-open QR here)", flush=True)
+        elif _lan_url:
+            if _HAS_QR:
+                print(f"  scan to open on your phone ({_lan_url}):", flush=True)
+                qr = qrcode.QRCode(border=1)
+                qr.add_data(_lan_url)
+                qr.make(fit=True)
+                qr.print_ascii(invert=True)
+            else:
+                print(f"  scan-to-open URL: {_lan_url}  (pip install qrcode for a terminal "
+                      f"QR code)", flush=True)
+        else:
+            print("  couldn't detect a LAN IP -- phone QR codes in the web UI won't work "
+                  "until you restart with reachable networking", flush=True)
     srv.serve_forever()
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    run_web_ui(port)
+    import argparse
+    parser = argparse.ArgumentParser(description='dura local control UI')
+    parser.add_argument('port', nargs='?', type=int, default=8080,
+                         help='port to listen on (default: 8080)')
+    parser.add_argument('--port', dest='port_flag', type=int,
+                         help='same as the positional port arg, --port form')
+    parser.add_argument('--bind', default='127.0.0.1',
+                         help='bind address (default: 127.0.0.1, local only -- no auth is '
+                              'built, so only widen this on a network you trust)')
+    args = parser.parse_args()
+    port = args.port_flag if args.port_flag is not None else args.port
+    run_web_ui(port, bind_host=args.bind)
 
 
 if __name__ == '__main__':

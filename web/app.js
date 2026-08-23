@@ -24,9 +24,57 @@ function relayQuery(relays) {
   return relays.map(r => 'relay=' + encodeURIComponent(r)).join('&');
 }
 
-function shortHash(h, n = 16) {
+function shortHash(h, n = 10) {
   return h ? h.slice(0, n) + '…' : '';
 }
+
+// ── QR popup, shared by the header "open on phone" button and each
+// downloaded video's per-item scan button ─────────────────────────────────
+
+function toggleQr(anchorEl, url) {
+  let popup = document.getElementById('shared-qr-popup');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'shared-qr-popup';
+    popup.className = 'qr-popup hidden';
+    document.body.appendChild(popup);
+  }
+  if (!popup.classList.contains('hidden') && popup.dataset.url === url) {
+    popup.classList.add('hidden');
+    return;
+  }
+  popup.dataset.url = url;
+  popup.innerHTML =
+    '<img src="/api/qr?data=' + encodeURIComponent(url) + '" alt="QR code for ' + url + '">' +
+    '<div class="qr-url">' + url + '</div>';
+  const rect = anchorEl.getBoundingClientRect();
+  popup.style.top = (rect.bottom + window.scrollY + 6) + 'px';
+  popup.style.left = (rect.left + window.scrollX) + 'px';
+  popup.classList.remove('hidden');
+}
+
+document.addEventListener('click', e => {
+  const popup = document.getElementById('shared-qr-popup');
+  if (!popup || popup.classList.contains('hidden')) return;
+  if (popup.contains(e.target) || e.target.closest('.qr-btn, #phone-qr-toggle')) return;
+  popup.classList.add('hidden');
+});
+
+// The server's idea of "your phone's own address" beats the browser's:
+// location.origin only reflects whatever address *this* browser used to
+// load the page, which is 127.0.0.1 the instant someone opens it via
+// localhost -- exactly the bug a LAN-bound server needs to avoid handing
+// a phone a QR code that points right back at the desktop machine.
+let lanUrlBase = null;
+fetch('/api/lan-url').then(r => r.json()).then(d => { lanUrlBase = d.url; }).catch(() => {});
+
+function qrBaseUrl() {
+  return lanUrlBase || (location.origin + '/');
+}
+
+document.getElementById('phone-qr-toggle').addEventListener('click', e => {
+  toggleQr(e.currentTarget, qrBaseUrl());
+});
 
 // ── tabs ─────────────────────────────────────────────────────────────────
 
@@ -224,8 +272,15 @@ function pollJob(jobId) {
       playBtn.className = 'play-btn';
       playBtn.textContent = '▶ Play';
       playBtn.addEventListener('click', () => playInline(jobId));
+      const qrBtn = document.createElement('button');
+      qrBtn.type = 'button';
+      qrBtn.className = 'play-btn qr-btn';
+      qrBtn.textContent = '📱';
+      qrBtn.title = 'scan to open this video on your phone';
+      qrBtn.addEventListener('click', () => toggleQr(qrBtn, qrBaseUrl() + 'api/stream/' + jobId));
       resultCell.appendChild(pathSpan);
       resultCell.appendChild(playBtn);
+      resultCell.appendChild(qrBtn);
       clearInterval(timer);
     } else if (job.status === 'error') {
       statusCell.textContent = 'error';
