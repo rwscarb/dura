@@ -13,6 +13,8 @@ built (same "reachability is on you" honesty --advertise-host's docs
 already apply elsewhere in this repo). Pass --bind to expose it on a LAN
 at your own risk.
 """
+import contextlib
+import io
 import json
 import mimetypes
 import os
@@ -33,6 +35,49 @@ except ImportError:
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 DEFAULT_RELAY = 'http://127.0.0.1:9101'
+
+
+class _JobStdout:
+    """Replaces sys.stdout for this whole process so a background job
+    thread (host/download) can be muted without touching a single print()
+    in node.py -- those are correct and wanted when the same functions
+    run from dura.py or the interactive shell, where a human is actually
+    watching the terminal. They're just noise here: nothing reads this
+    process's stdout, and a job's real status already goes through
+    _jobs[job_id]/_hosts[host_id], which the API/frontend actually poll.
+
+    Routes by the *calling* thread, not a single global swap -- a
+    threading.local() flag, so two jobs running concurrently in different
+    threads (or a job running while the main thread prints its own
+    [web:PORT] startup line) can't clobber each other's output."""
+
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def write(self, s):
+        buf = getattr(self._local, 'buf', None)
+        (buf if buf is not None else self._real).write(s)
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+sys.stdout = _JobStdout(sys.stdout)
+
+
+@contextlib.contextmanager
+def _quiet():
+    """Mute node.py's CLI-oriented prints for the current thread only,
+    for the duration of the with-block."""
+    sys.stdout._local.buf = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stdout._local.buf = None
 
 _hosts = {}   # host_id -> dict describing an actively-hosted file
 _jobs = {}    # job_id -> dict describing a download's progress/result
@@ -75,30 +120,32 @@ def _detect_lan_ip():
 
 def _run_host_job(host_id, archive_dir, file_name, port, price, relay_urls, advertise_host, tunnel):
     try:
-        identity = _identity()
-        entry = node.find_manifest_entry(archive_dir, file_name)
-        # fail fast, before announcing anything — a manifest entry with no
-        # matching chunk data would otherwise get announced to the relay
-        # and only fail later, deep in a background thread with no way
-        # for the UI to ever find out
-        leaves = node.load_leaves(archive_dir, entry['sha256'])
-        announced = []
-        for relay_url in relay_urls:
-            host_addr = f'{advertise_host}:{port}'
-            node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr, tunnel=tunnel)
-            announced.append(relay_url)
-        with _lock:
-            _hosts[host_id].update(name=entry['name'], content_hash=entry['sha256'],
-                                    announced_on=announced, status='running')
-        if tunnel:
-            relay_host, relay_port = tunnel.rsplit(':', 1)
-            expanded_dir = os.path.expanduser(archive_dir)
-            file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
-            threading.Thread(target=node.run_host_tunnel,
-                              args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
-                                    file_path, price),
-                              kwargs={'quiet': True}, daemon=True).start()
-        node.run_host_server(archive_dir, file_name, port, quiet=True, price=price)
+        with _quiet():
+            identity = _identity()
+            entry = node.find_manifest_entry(archive_dir, file_name)
+            # fail fast, before announcing anything — a manifest entry with no
+            # matching chunk data would otherwise get announced to the relay
+            # and only fail later, deep in a background thread with no way
+            # for the UI to ever find out
+            leaves = node.load_leaves(archive_dir, entry['sha256'])
+            announced = []
+            for relay_url in relay_urls:
+                host_addr = f'{advertise_host}:{port}'
+                node.publish(identity, relay_url, entry['sha256'], entry['name'], host_addr,
+                              tunnel=tunnel)
+                announced.append(relay_url)
+            with _lock:
+                _hosts[host_id].update(name=entry['name'], content_hash=entry['sha256'],
+                                        announced_on=announced, status='running')
+            if tunnel:
+                relay_host, relay_port = tunnel.rsplit(':', 1)
+                expanded_dir = os.path.expanduser(archive_dir)
+                file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
+                threading.Thread(target=node.run_host_tunnel,
+                                  args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
+                                        file_path, price),
+                                  kwargs={'quiet': True}, daemon=True).start()
+            node.run_host_server(archive_dir, file_name, port, quiet=True, price=price)
     except SystemExit as e:
         with _lock:
             _hosts[host_id].update(status='error', error=str(e))
@@ -113,8 +160,9 @@ def _run_download_job(job_id, content_hash, relay_urls, out_path, k, use_lightni
             _jobs[job_id].update(idx=idx, n_chunks=n_chunks)
 
     try:
-        path = node.download_with_auction(content_hash, relay_urls, out_path=out_path, k=k,
-                                           use_lightning=use_lightning, on_progress=on_progress)
+        with _quiet():
+            path = node.download_with_auction(content_hash, relay_urls, out_path=out_path, k=k,
+                                               use_lightning=use_lightning, on_progress=on_progress)
         with _lock:
             _jobs[job_id].update(status='done', path=path)
     except SystemExit as e:
