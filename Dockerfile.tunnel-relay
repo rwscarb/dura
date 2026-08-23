@@ -1,0 +1,14 @@
+# Tunnel relay for dura's NAT-traversal path — see tunnel_relay.py's own
+# docstring for the rendezvous protocol. Zero external dependencies
+# (secrets/socket/socketserver/sys/threading are all stdlib), so this
+# image doesn't need requirements.txt at all — just the one file.
+#
+# Separate from the repo's existing Dockerfile on purpose: that one is
+# dedicated to poc_network_challenge.py's holder/relay/verifier demo via
+# docker-compose.yml — different entrypoint, different job, shouldn't be
+# touched or reused for this.
+FROM python:3.13-slim
+WORKDIR /app
+COPY tunnel_relay.py .
+EXPOSE 9199
+ENTRYPOINT ["python3", "tunnel_relay.py", "9199"]

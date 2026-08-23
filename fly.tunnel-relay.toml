@@ -1,0 +1,46 @@
+# fly.toml app configuration file generated for dura-honeyed-sandbar-8964 on 2026-08-23T16:19:23-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'dura-honeyed-sandbar-8964'
+primary_region = 'sjc'
+
+[build]
+  dockerfile = 'Dockerfile.tunnel-relay'
+
+[deploy]
+  strategy = 'immediate'
+
+# `fly launch` auto-added an [http_service] block on top of this (it saw
+# EXPOSE 9199 in the Dockerfile and assumed a web app) — removed on
+# purpose. This is a raw TCP rendezvous relay, not HTTP; [http_service]
+# also set min_machines_running = 0 / auto_stop_machines = 'stop', which
+# would let Fly scale this to zero between uses. A persistent REGISTER
+# connection can't wake a scaled-to-zero machine the way an HTTP request
+# can, so that setting alone would silently break hosting whenever the
+# relay had been idle.
+[[services]]
+  protocol      = 'tcp'
+  internal_port = 9199
+
+  [[services.ports]]
+    handlers = ["tls"]
+    port = 9199
+
+  [services.concurrency]
+    type       = 'connections'
+    hard_limit = 1000
+    soft_limit = 800
+
+[[vm]]
+  size = 'shared-cpu-1x'
+
+  # Exactly 1, always -- never let this autoscale. Two replicas means a
+  # REGISTER and a CONNECT for the same token can land on different
+  # machines that have never heard of each other's state (see
+  # tunnel_relay.py -- _registrations/_pending_streams are one process's
+  # in-memory dicts, not a shared store), silently breaking any pairing
+  # that crosses the split. This also keeps the relay always-on, same
+  # intent as the [http_service] settings that got removed above.
+  min_machines_running = 1

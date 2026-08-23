@@ -76,10 +76,12 @@ def build_parser():
                          help='address to tell the relay to advertise (set this to your real '
                               'reachable IP if hosting off localhost — or use --tunnel if you '
                               'have no reachable address at all, e.g. behind NAT/CGNAT)')
-    p_host.add_argument('--tunnel', metavar='RELAY_HOST:PORT',
+    p_host.add_argument('--tunnel', metavar='[tls://]RELAY_HOST:PORT',
                          help='tunnel_relay.py address to register with instead of relying on a '
                               'reachable inbound port — see tunnel_relay.py. Downloaders connect '
-                              'through the relay, not to you directly')
+                              'through the relay, not to you directly. Prefix with tls:// if the '
+                              'relay terminates TLS at the edge (e.g. a Fly service with '
+                              'handlers = ["tls"]) — the relay process itself never needs to know')
 
     p_discover = sub.add_parser('discover', help='list real content announced on one or more relays')
     p_discover.add_argument('--relay', action='append', default=['http://127.0.0.1:9101'],
@@ -152,13 +154,13 @@ def cmd_host(args):
             print(f"announced {entry['name']} on {relay_url}: {result}")
     if args.tunnel:
         entry = entries[0]
-        relay_host, relay_port = args.tunnel.rsplit(':', 1)
+        relay_host, relay_port, use_tls = node._parse_tunnel(args.tunnel)
         archive_dir = os.path.expanduser(args.archive_dir)
         file_path = entry.get('last_path') or os.path.join(archive_dir, entry['name'])
         threading.Thread(target=node.run_host_tunnel,
-                          args=(relay_host, int(relay_port), entry['sha256'], entry,
+                          args=(relay_host, relay_port, entry['sha256'], entry,
                                 all_leaves[entry['sha256']], file_path, args.price),
-                          daemon=True).start()
+                          kwargs={'use_tls': use_tls}, daemon=True).start()
     node.run_host_server(args.archive_dir, args.file, args.port, price=args.price)
 
 

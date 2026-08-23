@@ -24,6 +24,7 @@ import json
 import os
 import random
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -276,7 +277,24 @@ def run_host_server(archive_dir, file_name, port, bind_host='0.0.0.0', quiet=Fal
                           daemon=True).start()
 
 
-def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, price, quiet=False):
+def _connect_tunnel_socket(relay_host, relay_port, use_tls):
+    """Plain TCP to the tunnel relay, or TLS-wrapped if the relay
+    terminates TLS at the edge (e.g. Fly's `handlers = ["tls"]`) — the
+    relay process itself (tunnel_relay.py) never sees or needs to know
+    about TLS either way, since edge termination decrypts before
+    forwarding to it. Only the two ends actually crossing the public
+    internet need this: a host's REGISTER/DATA connections here, and a
+    downloader's CONNECT in HostConnection.connect_via_tunnel."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((relay_host, relay_port))
+    if use_tls:
+        ctx = ssl.create_default_context()
+        sock = ctx.wrap_socket(sock, server_hostname=relay_host)
+    return sock
+
+
+def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, price,
+                     use_tls=False, quiet=False):
     """NAT-traversal path: instead of (or alongside) binding a locally
     reachable port, register with a tunnel_relay.py relay and serve every
     downloader it pairs us with. One persistent CONTROL connection stays
@@ -284,11 +302,11 @@ def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, pri
     DATA connection, dialed back to the relay on demand (NEWSTREAM), so
     concurrent tunneled downloads don't block each other."""
     entries_by_hash = {entry['sha256']: (entry, leaves, file_path)}
-    ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    ctrl.connect((relay_host, relay_port))
+    ctrl = _connect_tunnel_socket(relay_host, relay_port, use_tls)
     ctrl.sendall(f'REGISTER {token}\n'.encode())
     if not quiet:
-        print(f"[tunnel] registered {token[:16]}... with relay {relay_host}:{relay_port}")
+        tls_note = ' (tls)' if use_tls else ''
+        print(f"[tunnel] registered {token[:16]}... with relay {relay_host}:{relay_port}{tls_note}")
 
     reader = LineReader(ctrl)
     while True:
@@ -300,8 +318,7 @@ def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, pri
         parts = line.split()
         if parts and parts[0] == 'NEWSTREAM':
             stream_id = parts[1]
-            data_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            data_conn.connect((relay_host, relay_port))
+            data_conn = _connect_tunnel_socket(relay_host, relay_port, use_tls)
             data_conn.sendall(f'DATA {stream_id}\n'.encode())
             threading.Thread(target=serve_session,
                               args=(data_conn, entries_by_hash, entry['sha256'], price),
@@ -327,13 +344,16 @@ class HostConnection:
         return cls(sock)
 
     @classmethod
-    def connect_via_tunnel(cls, relay_host, relay_port, token, timeout=10):
+    def connect_via_tunnel(cls, relay_host, relay_port, token, use_tls=False, timeout=10):
         """token is the content_hash the host registered under (see
         run_host_tunnel) — the tunnel relay has zero opinion on content,
         it just pairs this CONNECT with that host's next NEWSTREAM."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((relay_host, relay_port))
+        if use_tls:
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=relay_host)
         sock.sendall(f'CONNECT {token}\n'.encode())
         return cls(sock)
 
@@ -352,23 +372,32 @@ class HostConnection:
 
 
 def _parse_tunnel(tunnel_addr):
-    """'relay_host:relay_port' -> (relay_host, relay_port), or None."""
+    """'relay_host:relay_port' or 'tls://relay_host:relay_port' ->
+    (relay_host, relay_port, use_tls), or None. The tls:// prefix marks a
+    relay that terminates TLS at the edge (e.g. Fly's `handlers =
+    ["tls"]`) — publish() stores this string as given, so a downloader
+    who discovers the host gets the same tls:// marker automatically and
+    connects the same way the host registered."""
     if not tunnel_addr:
         return None
+    use_tls = tunnel_addr.startswith('tls://')
+    if use_tls:
+        tunnel_addr = tunnel_addr[len('tls://'):]
     relay_host, relay_port = tunnel_addr.rsplit(':', 1)
-    return relay_host, int(relay_port)
+    return relay_host, int(relay_port), use_tls
 
 
 def open_connection(host_addr, tunnel=None, content_hash=None, timeout=10):
     """host_addr is 'host:port' — used directly unless tunnel is given, in
     which case it's ignored and content_hash is used as the tunnel
     rendezvous token instead (the host isn't reachable at host_addr at
-    all in that case)."""
+    all in that case). tunnel is a pre-parsed _parse_tunnel() result."""
     if tunnel:
         if not content_hash:
             raise ValueError("tunnel connection requires content_hash as the rendezvous token")
-        relay_host, relay_port = tunnel
-        return HostConnection.connect_via_tunnel(relay_host, relay_port, content_hash, timeout=timeout)
+        relay_host, relay_port, use_tls = tunnel
+        return HostConnection.connect_via_tunnel(relay_host, relay_port, content_hash,
+                                                   use_tls=use_tls, timeout=timeout)
     host, port_s = host_addr.rsplit(':', 1)
     return HostConnection.connect_direct(host, int(port_s), timeout=timeout)
 
