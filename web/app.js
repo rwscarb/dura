@@ -173,6 +173,17 @@ document.getElementById('download-form').addEventListener('submit', async e => {
   pollJob(resp.job_id);
 });
 
+function playInline(jobId) {
+  const container = document.getElementById('player-container');
+  container.innerHTML = '';
+  const video = document.createElement('video');
+  video.controls = true;
+  video.autoplay = true;
+  video.src = '/api/stream/' + jobId;
+  container.appendChild(video);
+  container.scrollIntoView({behavior: 'smooth'});
+}
+
 function addJobRow(jobId, contentHash) {
   const tbody = document.querySelector('#jobs-table tbody');
   const tr = document.createElement('tr');
@@ -205,7 +216,16 @@ function pollJob(jobId) {
       fill.style.width = '100%';
       statusCell.textContent = 'done';
       statusCell.className = 'status-done';
-      resultCell.textContent = job.path;
+      resultCell.textContent = '';
+      const pathSpan = document.createElement('span');
+      pathSpan.textContent = job.path + ' ';
+      const playBtn = document.createElement('button');
+      playBtn.type = 'button';
+      playBtn.className = 'play-btn';
+      playBtn.textContent = '▶ Play';
+      playBtn.addEventListener('click', () => playInline(jobId));
+      resultCell.appendChild(pathSpan);
+      resultCell.appendChild(playBtn);
       clearInterval(timer);
     } else if (job.status === 'error') {
       statusCell.textContent = 'error';

@@ -132,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
             reputation = ReputationStore(os.path.expanduser('~/.dura_reputation.json'))
             score, why = reputation.trust_score(pubkey)
             return self._json({'pubkey': pubkey, 'score': score, 'why': why})
+        if path.startswith('/api/stream/'):
+            return self._handle_stream(path[len('/api/stream/'):])
         self._serve_static(path)
 
     def do_POST(self):
@@ -206,6 +208,68 @@ class Handler(BaseHTTPRequestHandler):
         identity = _identity()
         event = identity.sign_event('subscribe', target_pubkey=target_pubkey)
         self._json({'result': node.post_event(body.get('relay') or DEFAULT_RELAY, event)})
+
+    def _handle_stream(self, job_id):
+        """Serve an already-downloaded job's file with real HTTP range
+        support, so a <video> tag can seek/scrub instead of just
+        downloading the whole thing blind — the actual gap behind
+        'play/open media': the web UI could already trigger a download,
+        but the bytes only ever landed on this server's disk, never made
+        it to the browser. This is a thin BaseHTTPRequestHandler, so
+        range parsing is done by hand rather than pulled in from a
+        framework — same "no new dependency" choice as the rest of this
+        file."""
+        with _lock:
+            job = _jobs.get(job_id)
+        if not job or job.get('status') != 'done' or not job.get('path'):
+            return self._json({'error': 'no completed download for that job id'}, status=404)
+        path = job['path']
+        if not os.path.isfile(path):
+            return self._json({'error': f'{path} no longer exists on disk'}, status=404)
+
+        file_size = os.path.getsize(path)
+        ctype, _ = mimetypes.guess_type(path)
+        ctype = ctype or 'application/octet-stream'
+
+        range_header = self.headers.get('Range')
+        if range_header:
+            try:
+                _, _, range_spec = range_header.partition('=')
+                start_s, _, end_s = range_spec.partition('-')
+                start = int(start_s) if start_s else 0
+                end = int(end_s) if end_s else file_size - 1
+                end = min(end, file_size - 1)
+            except ValueError:
+                return self._json({'error': f'malformed Range header: {range_header!r}'}, status=400)
+            if start > end or start >= file_size:
+                self.send_response(416)
+                self.send_header('Content-Range', f'bytes */{file_size}')
+                self.end_headers()
+                return
+            length = end - start + 1
+            self.send_response(206)
+            self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+        else:
+            start, length = 0, file_size
+            self.send_response(200)
+
+        self.send_header('Content-Type', ctype)
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Content-Length', str(length))
+        self.end_headers()
+
+        with open(path, 'rb') as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(262144, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return  # client seeked or closed mid-stream -- not an error
+                remaining -= len(chunk)
 
     def _serve_static(self, path):
         if path == '/':

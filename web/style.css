@@ -142,6 +142,27 @@ td button {
 .status-error { color: var(--danger); }
 .status-running { color: var(--muted); }
 
+.play-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#player-container {
+  margin-top: 1rem;
+}
+
+#player-container video {
+  width: 100%;
+  max-width: 720px;
+  border-radius: 6px;
+  background: #000;
+}
+
 #host-result, #reputation-result {
   margin-top: 0.75rem;
   font-size: 0.85rem;
