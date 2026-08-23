@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+download_*
 real_archive/*.mp4
 real_archive/.ott/objects/
 download_*
