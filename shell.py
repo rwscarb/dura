@@ -19,6 +19,7 @@ import threading
 
 import discovery_relay
 import node
+import web_ui
 
 
 class DuraShell(cmd.Cmd):
@@ -173,6 +174,26 @@ class DuraShell(cmd.Cmd):
         self.default_relay = f'http://127.0.0.1:{port}'
         print(f'  relay running on port {port} in the background — set as your default relay')
 
+    def do_serve(self, arg):
+        """serve [bind] [port]  — run the local web control UI in the background
+        (default 127.0.0.1:8080; pass 0.0.0.0 to reach it from your phone).
+        Same server web_ui.py runs standalone, just launched inline so you
+        don't need a second terminal. Its own page has a 📱 button for a
+        scan-to-open QR code once it's up."""
+        parts = shlex.split(arg)
+        bind_host = parts[0] if len(parts) > 0 else '127.0.0.1'
+        port = int(parts[1]) if len(parts) > 1 else 8080
+        t = threading.Thread(target=web_ui.run_web_ui, args=(port,),
+                              kwargs={'bind_host': bind_host, 'quiet': True}, daemon=True)
+        t.start()
+        self._host_threads.append(t)
+        if bind_host == '0.0.0.0':
+            print(f'  web control UI running on all interfaces, port {port}, in the background '
+                  f'— open http://127.0.0.1:{port}/ here, or use its 📱 button to reach it '
+                  f'from your phone')
+        else:
+            print(f'  web control UI running at http://{bind_host}:{port}/ in the background')
+
     def do_discover(self, arg):
         """discover [relay_url ...]  — list content announced on one or more relays
         (default: the last relay used, or http://127.0.0.1:9101)."""
@@ -257,6 +278,7 @@ class DuraShell(cmd.Cmd):
     def do_w(self, arg): return self.do_whoami(arg)
     def do_h(self, arg): return self.do_host(arg)
     def do_r(self, arg): return self.do_relay(arg)
+    def do_s(self, arg): return self.do_serve(arg)
     def do_disc(self, arg): return self.do_discover(arg)
     def do_dl(self, arg): return self.do_download(arg)
     def do_get(self, arg): return self.do_download(arg)

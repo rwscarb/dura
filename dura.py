@@ -115,6 +115,14 @@ def build_parser():
                         help='bind address (default 127.0.0.1 — local only; no auth is built, '
                              'so only widen this on a network you trust)')
 
+    p_serve = sub.add_parser('serve', help='alias for "web" with positional args, '
+                                            'e.g. `serve 0.0.0.0 8080`')
+    p_serve.add_argument('bind', nargs='?', default='127.0.0.1',
+                          help='bind address (default 127.0.0.1; pass 0.0.0.0 to reach it '
+                               'from your phone — no auth is built, only widen this on a '
+                               'network you trust)')
+    p_serve.add_argument('port', nargs='?', type=int, default=8080)
+
     return parser
 
 
@@ -201,7 +209,7 @@ def cmd_web(args):
 NATIVE_COMMANDS = {
     'whoami': cmd_whoami, 'host': cmd_host, 'discover': cmd_discover,
     'download': cmd_download, 'get': cmd_download, 'like': cmd_like, 'subscribe': cmd_subscribe,
-    'web': cmd_web,
+    'web': cmd_web, 'serve': cmd_web,
 }
 
 
