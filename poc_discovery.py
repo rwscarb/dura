@@ -186,12 +186,12 @@ def main():
         recovery_events = client_view(RELAY_PORTS, 'bob-after-kill')
         recovery_ranking = rank_content(recovery_events, bob_trust)
         print(f"    ranking after relay:{RELAY_PORTS[0]} is dead: {recovery_ranking}")
-        print(f"    content is still discoverable and rankable (erin's like survived on a different "
-              f"relay) — but carol's publish event (the human-readable title) and dan's like both "
-              f"only ever lived on the now-dead relay, so the title is gone (falls back to the raw "
-              f"hash) and bob's score dropped from 2.0 to 1.0. real limitation, not a clean win: a "
-              f"relay dying loses whatever *only it* had. redundancy has to be deliberate — post to "
-              f"more than one relay — it isn't automatic just because relays are plural.")
+        print("    content is still discoverable and rankable (erin's like survived on a different "
+              "relay) — but carol's publish event (the human-readable title) and dan's like both "
+              "only ever lived on the now-dead relay, so the title is gone (falls back to the raw "
+              "hash) and bob's score dropped from 2.0 to 1.0. real limitation, not a clean win: a "
+              "relay dying loses whatever *only it* had. redundancy has to be deliberate — post to "
+              "more than one relay — it isn't automatic just because relays are plural.")
 
     finally:
         for p in procs:

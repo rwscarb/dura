@@ -1,6 +1,10 @@
-__pycache__/
-*.pyc
+build/
+dist/
 download_*
+dura.egg-info/
+*.egg-info/
+*.pyc
+__pycache__/
 real_archive/*.mp4
 real_archive/.ott/objects/
-download_*
+.ruff_cache/

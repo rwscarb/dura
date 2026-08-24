@@ -487,8 +487,8 @@ def download(host_addr, out_path, tunnel=None, content_hash=None, on_progress=No
         elapsed = time.time() - t0
     actual_size = os.path.getsize(out_path)
     print(f"\n{info['n_chunks']} chunks downloaded and verified in {elapsed:.1f}s")
-    print(f"Merkle root over received chunks matches host's advertised sha256: True "
-          f"(checked before downloading, not after)")
+    print("Merkle root over received chunks matches host's advertised sha256: True "
+          "(checked before downloading, not after)")
     if actual_size != info['size']:
         os.remove(out_path)
         sys.exit(f"size mismatch: wrote {actual_size:,} bytes, host advertised {info['size']:,} "

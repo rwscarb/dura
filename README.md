@@ -557,6 +557,71 @@ optional `PRICE` wire verb: `publish()` gained an optional `tunnel`
 field (`'relay_host:relay_port'` or absent); a candidate without it is
 just connected to directly, exactly as before this existed.
 
+**TLS**, for tunnel relays that terminate it at the edge instead of
+speaking it themselves (deployed one on Fly with `handlers = ["tls"]` —
+`fly.tunnel-relay.toml` + `Dockerfile.tunnel-relay` in this repo): prefix
+the address with `tls://` — `--tunnel tls://tunnel.example.com:9199`.
+`tunnel_relay.py` itself never changes; edge termination decrypts before
+the bytes ever reach it, so only the two ends that actually cross the
+public internet (the host's `REGISTER`/`DATA` connections, a
+downloader's `CONNECT`) wrap the socket in
+`ssl.create_default_context()` — real CA validation by default, not a
+weakened check. Verified against a real self-signed-cert TLS-terminating
+proxy built specifically to test this (mimicking exactly what Fly's edge
+does): confirmed the client correctly *rejects* an untrusted cert before
+trusting it, then a full host→tunnel→download round-trip over the
+encrypted path, byte-identical result.
+
+**Heartbeat**, for the same idle-connection problem real deployments
+actually hit: the `REGISTER` control connection sends nothing between
+registering and the first real download, sometimes for a long time.
+Fly's own edge (confirmed from real production logs, not a guess) resets
+TCP connections idle more than a few minutes, which silently
+unregistered the host with no error until the next download failed.
+Fixed with a small periodic `PING` on the control connection —
+`tunnel_relay.py` needed zero changes, its `REGISTER` loop already
+discards anything it receives that isn't relevant. Proved it against a
+real idle-enforcing test server (3-second idle limit): without the
+heartbeat, killed at exactly 3.0s; with it, survived 8 full seconds with
+no kill event at all.
+
+### `dht.py` — real Kademlia DHT discovery, no relay required
+
+Every other discovery path in this repo needs a relay URL, told to you
+out of band — real, and a real limitation, until now: `dht.py` answers
+"how do two nodes find each other with no shared server" using an actual
+Kademlia DHT, via the real `kademlia` PyPI library rather than
+reimplementing node-IDs/k-buckets/RPC routing from scratch. Scoped
+honestly: this covers `announce(content_hash, host_addr)` /
+`lookup(content_hash)` — not the richer signed-event system
+(publish/like/subscribe/attestation/trust-graph) `discovery_relay.py`
+already handles, since Kademlia's plain key→value store isn't a natural
+fit for an append-only event log. That richer system staying on relays
+is a deliberate scope boundary, not an oversight.
+
+Multiple announcers of the same content are merged, not overwritten —
+`kademlia`'s `set()` is single-value-per-key, so a naive announce would
+silently drop everyone else's listing; `_announce()` fetches, merges,
+re-announcing from the same host again correctly doesn't duplicate.
+
+Proved with three separate, escalating real tests: three chained nodes
+(C only ever bootstrapped through B, never spoke to A directly) — content
+announced on A was found from C, real Kademlia routing, not a shared-
+memory illusion. Two different hosts announcing the same content — both
+preserved. And the strongest one: a node announced content, then that
+node's *entire process exited* — a completely independent fourth process,
+knowing only the original bootstrap node, still found what was announced.
+Real value replication surviving the announcer going offline, which is
+the actual point of a DHT over a relay.
+
+```bash
+python3 dht.py 8468                          # first node, new swarm
+python3 dht.py 8469 127.0.0.1:8468           # second node, joins the first
+```
+
+Or from the shell: `dht start [port] [bootstrap_host:port]`,
+`dht announce <content_hash> <host:port> [title]`, `dht lookup <content_hash>`.
+
 ### `web_ui.py` — local web UI
 
 Hosting/discovering/downloading/liking/subscribing all required
@@ -580,7 +645,8 @@ same way `shell.py`'s `do_host` already does) + `GET /api/hosts`,
 `POST /api/download` + `GET /api/download/<job_id>` for polling progress
 (`download()` gained an optional `on_progress(idx, n_chunks)` callback,
 default no-op, so CLI output is unaffected), `POST /api/like`,
-`POST /api/subscribe`, `GET /api/reputation/<pubkey>`.
+`POST /api/subscribe`, `GET /api/reputation/<pubkey>`,
+`GET /api/stream/<job_id>`, `GET /api/qr?data=...`, `GET /api/lan-url`.
 
 Real end-to-end proof, not just the API responding: hosted a file
 through the **Host** form, confirmed a second terminal's `dura discover`
@@ -590,9 +656,32 @@ progress bar, `cmp`-verified byte-identical; liked and subscribed
 through the UI, confirmed the real signed events landed on the relay by
 querying it directly.
 
+**Streaming** (`/api/stream/<job_id>`) — the actual gap behind "play
+media on my phone": the UI could already trigger a download, but the
+bytes only ever landed on this server's disk, never reached the browser.
+Real HTTP range support (`Accept-Ranges`, `206 Partial Content`, `416`
+for out-of-range), so a `<video>` tag can seek instead of downloading
+blind. Verified with real range requests against a real completed
+download — full fetch, a mid-file range, and an open-ended range, all
+byte-exact against the source; error paths (out-of-range, unknown job)
+checked too.
+
+**QR codes** (`/api/qr`, terminal QR on startup) — same `qrcode` package
+`ott`'s own `ott qr` already uses. `--bind 0.0.0.0` auto-detects the real
+LAN IP (a UDP-route trick, no packet actually sent) instead of printing
+the useless literal `0.0.0.0`, so the printed/scanned URL is one a phone
+can actually reach — and it's computed server-side and exposed via
+`/api/lan-url` specifically because the browser's own
+`location.origin` lies the instant you load the page via `localhost`
+instead of the LAN address; a real bug this caused (the header's "open
+on phone" QR pointing at `127.0.0.1`) was reproduced and fixed by having
+the client fetch the server's own answer instead of trusting
+`location.origin`.
+
 ```bash
-python3 dura.py web --port 8080
-# open http://127.0.0.1:8080/
+python3 dura.py serve                # alias for `web`, positional args: serve [bind] [port]
+python3 dura.py serve 0.0.0.0 8080    # reachable from your phone; prints a scan-to-open QR
+# or, from the shell: `serve [bind] [port]`
 ```
 
 ### `shell.py` — interactive, tab-completing, same pattern as `ott`'s shell
@@ -610,8 +699,19 @@ running it that way for real (`host` with no relay running produces
 relay that isn't there — real friction that surfaced from actually using
 it, not a hypothetical). `relay` also sets itself as the session's default
 relay, so `discover`/`download`/`like`/`subscribe` don't need `--relay`
-repeated every time. `host` also takes `--tunnel RELAY_HOST:PORT` now,
-same as the CLI — see `tunnel_relay.py` above.
+repeated every time. `host` also takes `--tunnel [tls://]RELAY_HOST:PORT`
+now, same as the CLI — see `tunnel_relay.py` above. `serve [bind] [port]`
+runs the web UI in the background without a second terminal — see
+`web_ui.py` above. `dht start/announce/lookup` runs a real Kademlia node
+in the background — see `dht.py` above. Every background command
+(`host`, `relay`, `serve`, `dht start`) goes through a shared `_bg()`
+wrapper now: a real failure inside one of those threads used to dump a
+raw Python traceback into the middle of the prompt (an uncaught
+exception in a background thread was never covered by `onecmd()`'s own
+try/except, which only wraps the synchronous part of a command) — caught
+live from a real `--tunnel ~/share` typo, fixed, reproduced the same
+crash again afterward to confirm it now prints a clean `✗ ...` line
+instead and the shell stays fully usable.
 
 Completion resolves against real state, not a fixed list — same idea as
 `ott`'s completions (which complete against the real archive). `download`
@@ -659,17 +759,24 @@ python3 poc_challenge_auction.py --lightning    # same auction, real HTLC settle
 python3 poc_real_archive_challenge.py           # same challenge mechanism, real 3324-chunk video
 python3 poc_discovery.py                        # 3 real relays, personalized ranking, sybil test
 python3 tunnel_relay.py 9199                    # NAT-traversal relay — see host --tunnel below
-python3 dura.py web --port 8080                 # local web UI at http://127.0.0.1:8080/
+python3 dura.py serve --bind 0.0.0.0 --port 8080  # local web UI, reachable from your phone
+python3 dht.py 8468                             # real Kademlia DHT node — see dht.py above
 ```
 
 `pip install -r requirements.txt` gets everything (`btcvm`, `cryptography`,
-`matplotlib`). Broken down: `poc_challenge_auction.py` (and
+`matplotlib`, `kademlia`). Broken down: `poc_challenge_auction.py` (and
 `poc_real_archive_challenge.py`, which imports from it) needs `btcvm`;
 `poc_reputation.py` and `poc_discovery.py` (which imports from it) need
-`cryptography`; `viz_challenge_separation.py` needs `matplotlib`.
-`poc_network_challenge.py` and `discovery_relay.py` are pure stdlib, no
-install needed. Docker/Compose needed for the container-network test and
-for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
+`cryptography`; `viz_challenge_separation.py` needs `matplotlib`;
+`dht.py` needs `kademlia`. `poc_network_challenge.py` and
+`discovery_relay.py` are pure stdlib, no install needed. `qrcode` is
+optional (`pip install qrcode`) — `web_ui.py`'s QR endpoints degrade to a
+plain URL, printed instead of rendered, if it's missing. Docker/Compose
+needed for the container-network test and for `--lightning` (real
+bitcoind + LND, see `lightning/README.md`).
+
+Or, packaged: `pip install -e .` (see `pyproject.toml`) installs a real
+`dura` command on your `PATH` instead of `python3 dura.py`.
 
 ## Next steps
 
@@ -703,16 +810,33 @@ for `--lightning` (real bitcoind + LND, see `lightning/README.md`).
     the same `node.py` functions the CLI calls, static vanilla-JS
     frontend, no new dependency. Host/discover/download/like/subscribe
     all verified working from the browser, not just the API responding.
+11. ~~Real P2P/DHT discovery~~ — done, `dht.py`: real Kademlia via the
+    `kademlia` library, not reimplemented. Content survived the
+    announcing node's process exiting entirely, found by a fourth,
+    independent process that only knew the original bootstrap node — real
+    value replication, not a two-party memory trick. Scoped honestly:
+    covers host-discovery only, not the richer event system.
+12. ~~TLS for tunnel relays~~ — done, `tls://` prefix on `--tunnel`,
+    verified against a real self-signed-cert TLS-terminating proxy built
+    specifically to test it, full host→tunnel→download round-trip over
+    the encrypted path.
+13. ~~Play media from the web UI~~ — done, `/api/stream` with real HTTP
+    range support, verified byte-exact against full/mid-file/open-ended
+    range requests.
+14. ~~Multi-file hosting~~ — done, `host <dir>` (no `--file`) serves every
+    archived file over one port, downloader `SELECT`s by content hash.
+    Fixes the original bug: a 45-file archive silently collapsed to
+    whichever file happened to be last in the manifest.
 
 Every item on the original roadmap is now built and verified against real
 output, not just designed — and `node.py` (below) wires host/discover/
 download/like/subscribe into one real tool instead of six disconnected
 demos. What's left is scaling and hardening this, not proving the
-mechanisms work — see each section above for the honest edges (loopback
+mechanisms work — see each section above for the honest edges that are
+still real constraints even though the core ideas held up: loopback
 timing separation isn't airtight without averaging, relay death loses
-non-redundant data, RunPod flakiness, regtest-only Lightning, still no
-real P2P/DHT discovery — you still have to know a relay URL out of
-band — the tunnel relay is a single point of failure/bandwidth cost with
-no redundancy story the way discovery relays have, and the web UI has no
-auth, local-only by design) that are still real constraints even though
-the core ideas held up.
+non-redundant data, RunPod flakiness, regtest-only Lightning, the DHT
+covers host-discovery but not the richer signed-event system, the tunnel
+relay (even with TLS) is still a single point of failure/bandwidth cost
+with no redundancy story the way discovery relays have, and the web UI
+has no auth, local-only by design.

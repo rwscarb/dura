@@ -33,7 +33,9 @@ def measure():
     expected_chunks = pnc.build_chunks()
     n_samples = 80
 
-    import subprocess, time, random
+    import subprocess
+    import time
+    import random
     holder_proc = subprocess.Popen([sys.executable, pnc.__file__, 'holder', str(holder_port)])
     relay_proc = subprocess.Popen(
         [sys.executable, pnc.__file__, 'relay', str(relay_port), '127.0.0.1', str(holder_port)])
@@ -97,7 +99,7 @@ def main():
     legend = ax.legend(loc='upper right', frameon=False, fontsize=9, labelcolor=TEXT_PRIMARY)
 
     fig.text(0.01, 0.01,
-              f'real measured data, loopback TCP, n=80 samples per role — not modeled',
+              'real measured data, loopback TCP, n=80 samples per role — not modeled',
               fontsize=8, color=TEXT_SECONDARY)
 
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'poc_challenge_separation.png')

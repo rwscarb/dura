@@ -62,7 +62,7 @@ def main():
         print(f"  chunk {idx:5d}: {len(proof)} steps, {raw_bytes}B raw, "
               f"{len(json.dumps(proof))}B as JSON")
 
-    print(f"\nreal nonce-salted challenge rounds, real bytes read from disk at real offsets:")
+    print("\nreal nonce-salted challenge rounds, real bytes read from disk at real offsets:")
     for round_n, idx in enumerate((0, 500, 1662, 2900, n_chunks - 1), 1):
         nonce = os.urandom(16)
         t0 = time.perf_counter()

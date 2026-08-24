@@ -129,17 +129,23 @@ class DuraShell(cmd.Cmd):
         i = 1
         while i < len(parts):
             if parts[i] == '--file' and i + 1 < len(parts):
-                i += 1; file_name = parts[i]
+                i += 1
+                file_name = parts[i]
             elif parts[i] == '--port' and i + 1 < len(parts):
-                i += 1; port = int(parts[i])
+                i += 1
+                port = int(parts[i])
             elif parts[i] == '--price' and i + 1 < len(parts):
-                i += 1; price = int(parts[i])
+                i += 1
+                price = int(parts[i])
             elif parts[i] == '--relay' and i + 1 < len(parts):
-                i += 1; relay = parts[i]
+                i += 1
+                relay = parts[i]
             elif parts[i] == '--advertise-host' and i + 1 < len(parts):
-                i += 1; advertise_host = parts[i]
+                i += 1
+                advertise_host = parts[i]
             elif parts[i] == '--tunnel' and i + 1 < len(parts):
-                i += 1; tunnel = parts[i]
+                i += 1
+                tunnel = parts[i]
             i += 1
 
         entries = node.load_manifest_entries(archive_dir, file_name)
@@ -319,11 +325,14 @@ class DuraShell(cmd.Cmd):
         i = 1
         while i < len(parts):
             if parts[i] == '--out' and i + 1 < len(parts):
-                i += 1; out = parts[i]
+                i += 1
+                out = parts[i]
             elif parts[i] == '--relay' and i + 1 < len(parts):
-                i += 1; relay = parts[i]
+                i += 1
+                relay = parts[i]
             elif parts[i] == '--rounds' and i + 1 < len(parts):
-                i += 1; rounds = int(parts[i])
+                i += 1
+                rounds = int(parts[i])
             i += 1
 
         node.download_with_auction(prefix, [relay], out_path=out, k=rounds, use_lightning=use_lightning)
