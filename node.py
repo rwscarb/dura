@@ -294,13 +294,23 @@ def _connect_tunnel_socket(relay_host, relay_port, use_tls):
 
 
 def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, price,
-                     use_tls=False, quiet=False):
+                     use_tls=False, quiet=False, heartbeat_interval=45):
     """NAT-traversal path: instead of (or alongside) binding a locally
     reachable port, register with a tunnel_relay.py relay and serve every
     downloader it pairs us with. One persistent CONTROL connection stays
     open for the lifetime of hosting; each real downloader gets its own
     DATA connection, dialed back to the relay on demand (NEWSTREAM), so
-    concurrent tunneled downloads don't block each other."""
+    concurrent tunneled downloads don't block each other.
+
+    The control connection sends nothing at all between REGISTER and the
+    first real NEWSTREAM — which can be minutes or hours if no one
+    downloads in the meantime. Real-world proxies in the middle (observed:
+    Fly's own edge) reset TCP connections that go idle for a few minutes,
+    which silently unregisters the host with no error on this end until
+    the next download attempt fails. A small periodic heartbeat keeps the
+    connection looking active; tunnel_relay.py's REGISTER loop already
+    discards anything it receives that isn't relevant to it (it only ever
+    checks for EOF), so this needs zero changes on the relay side."""
     entries_by_hash = {entry['sha256']: (entry, leaves, file_path)}
     ctrl = _connect_tunnel_socket(relay_host, relay_port, use_tls)
     ctrl.sendall(f'REGISTER {token}\n'.encode())
@@ -308,21 +318,38 @@ def run_host_tunnel(relay_host, relay_port, token, entry, leaves, file_path, pri
         tls_note = ' (tls)' if use_tls else ''
         print(f"[tunnel] registered {token[:16]}... with relay {relay_host}:{relay_port}{tls_note}")
 
-    reader = LineReader(ctrl)
-    while True:
-        line = reader.readline()
-        if not line:
-            if not quiet:
-                print(f"[tunnel] control connection to {relay_host}:{relay_port} closed")
-            return
-        parts = line.split()
-        if parts and parts[0] == 'NEWSTREAM':
-            stream_id = parts[1]
-            data_conn = _connect_tunnel_socket(relay_host, relay_port, use_tls)
-            data_conn.sendall(f'DATA {stream_id}\n'.encode())
-            threading.Thread(target=serve_session,
-                              args=(data_conn, entries_by_hash, entry['sha256'], price),
-                              daemon=True).start()
+    stop_heartbeat = threading.Event()
+
+    def send_heartbeats():
+        while not stop_heartbeat.wait(heartbeat_interval):
+            try:
+                ctrl.sendall(b'PING\n')
+            except OSError:
+                return
+
+    threading.Thread(target=send_heartbeats, daemon=True).start()
+
+    try:
+        reader = LineReader(ctrl)
+        while True:
+            line = reader.readline()
+            if not line:
+                if not quiet:
+                    print(f"[tunnel] control connection to {relay_host}:{relay_port} closed")
+                return
+            parts = line.split()
+            if parts and parts[0] == 'NEWSTREAM':
+                stream_id = parts[1]
+                data_conn = _connect_tunnel_socket(relay_host, relay_port, use_tls)
+                data_conn.sendall(f'DATA {stream_id}\n'.encode())
+                threading.Thread(target=serve_session,
+                                  args=(data_conn, entries_by_hash, entry['sha256'], price),
+                                  daemon=True).start()
+            # anything else (notably our own echoed-back nothing -- PING
+            # is one-directional, the relay never echoes it) is silently
+            # ignored, same as it always was
+    finally:
+        stop_heartbeat.set()
 
 
 # ── client side ──────────────────────────────────────────────────────────
