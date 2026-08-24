@@ -410,7 +410,13 @@ def _parse_tunnel(tunnel_addr):
     use_tls = tunnel_addr.startswith('tls://')
     if use_tls:
         tunnel_addr = tunnel_addr[len('tls://'):]
+    if ':' not in tunnel_addr:
+        raise ValueError(f"--tunnel {tunnel_addr!r} is missing a port — expected "
+                          f"[tls://]host:port, e.g. tls://tunnel.hak4.org:9199")
     relay_host, relay_port = tunnel_addr.rsplit(':', 1)
+    if not relay_port.isdigit():
+        raise ValueError(f"--tunnel port {relay_port!r} isn't a number — expected "
+                          f"[tls://]host:port, e.g. tls://tunnel.hak4.org:9199")
     return relay_host, int(relay_port), use_tls
 
 
