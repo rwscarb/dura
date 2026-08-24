@@ -138,13 +138,13 @@ def _run_host_job(host_id, archive_dir, file_name, port, price, relay_urls, adve
                 _hosts[host_id].update(name=entry['name'], content_hash=entry['sha256'],
                                         announced_on=announced, status='running')
             if tunnel:
-                relay_host, relay_port = tunnel.rsplit(':', 1)
+                relay_host, relay_port, use_tls = node._parse_tunnel(tunnel)
                 expanded_dir = os.path.expanduser(archive_dir)
                 file_path = entry.get('last_path') or os.path.join(expanded_dir, entry['name'])
                 threading.Thread(target=node.run_host_tunnel,
-                                  args=(relay_host, int(relay_port), entry['sha256'], entry, leaves,
+                                  args=(relay_host, relay_port, entry['sha256'], entry, leaves,
                                         file_path, price),
-                                  kwargs={'quiet': True}, daemon=True).start()
+                                  kwargs={'use_tls': use_tls, 'quiet': True}, daemon=True).start()
             node.run_host_server(archive_dir, file_name, port, quiet=True, price=price)
     except SystemExit as e:
         with _lock:
